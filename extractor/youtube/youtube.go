@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ammyy9908/goyt"
@@ -33,18 +34,58 @@ var playerAssignment = regexp.MustCompile(
 
 const maxPageBytes = 12 << 20
 
+type Option func(*Extractor)
+
+// WithChallengeSolver configures a ChallengeSolver on the Extractor.
+func WithChallengeSolver(solver ChallengeSolver) Option {
+	return func(e *Extractor) {
+		e.solver = solver
+	}
+}
+
+// WithHTTPClient configures an http.Client on the Extractor.
+func WithHTTPClient(client *http.Client) Option {
+	return func(e *Extractor) {
+		if client != nil {
+			e.client = client
+		}
+	}
+}
+
 type Extractor struct {
+	mu     sync.RWMutex
 	client *http.Client
+	solver ChallengeSolver
 }
 
 var _ goyt.Extractor = (*Extractor)(nil)
 
-func New(client *http.Client) *Extractor {
+// New initializes an Extractor with the given HTTP client and options.
+func New(client *http.Client, opts ...Option) *Extractor {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 
-	return &Extractor{client: client}
+	e := &Extractor{client: client}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+// Solver returns the configured ChallengeSolver, or nil.
+// It is safe for concurrent use.
+func (e *Extractor) Solver() ChallengeSolver {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.solver
+}
+
+// SetSolver updates the ChallengeSolver on the Extractor safely for concurrent use.
+func (e *Extractor) SetSolver(solver ChallengeSolver) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.solver = solver
 }
 
 func (e *Extractor) Name() string {
@@ -265,6 +306,14 @@ func (e *Extractor) fetchWatchPagePlayer(
 	ctx context.Context,
 	id string,
 ) (*playerResponse, error) {
+	player, _, err := e.fetchWatchPagePlayerAndHTML(ctx, id)
+	return player, err
+}
+
+func (e *Extractor) fetchWatchPageHTML(
+	ctx context.Context,
+	id string,
+) ([]byte, error) {
 	if !videoIDPattern.MatchString(id) {
 		return nil, errors.New("youtube: invalid video ID")
 	}
@@ -310,17 +359,29 @@ func (e *Extractor) fetchWatchPagePlayer(
 		return nil, err
 	}
 
+	return body, nil
+}
+
+func (e *Extractor) fetchWatchPagePlayerAndHTML(
+	ctx context.Context,
+	id string,
+) (*playerResponse, []byte, error) {
+	body, err := e.fetchWatchPageHTML(ctx, id)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	player, err := parsePlayer(body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if player.VideoDetails.VideoID != "" &&
 		player.VideoDetails.VideoID != id {
-		return nil, errors.New("youtube: response video ID does not match request")
+		return nil, nil, errors.New("youtube: response video ID does not match request")
 	}
 
-	return player, nil
+	return player, body, nil
 }
 
 func parsePlayer(page []byte) (*playerResponse, error) {

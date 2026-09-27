@@ -534,11 +534,10 @@ separate from automated PASS results.
 
 ## Limitations
 
-- No authenticated, members-only, DRM-protected, or live-video support.
-- No JavaScript signature/N-challenge solver or PO-token provider.
+- No JavaScript signature/N-challenge solver or PO-token provider is bundled in this phase. The extractor provides a replaceable `ChallengeSolver` interface and secure player-script discovery pipeline for future solver integrations, while defaulting to safe unsupported diagnostic error reporting.
 - No DASH or SABR downloading.
 - No automatic client fallback or bypass: When YouTube returns a bot-check challenge (e.g. `LOGIN_REQUIRED` with "Sign in to confirm you’re not a bot", commonly observed on Oracle Cloud and datacenter IP ranges), `goyt` diagnoses the condition descriptively (`bot_check_required`) without claiming to bypass it, attempting challenge solving, or automatically falling back to another client.
-- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability.
+- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability. Structured validation of solver outputs cannot guarantee that YouTube will accept the deciphered media request.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.

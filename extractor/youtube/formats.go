@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"fmt"
 	"mime"
 	"net/http"
 	"net/url"
@@ -23,7 +24,8 @@ func (e *Extractor) ExtractDownloadable(
 // ExtractDownloadableWithClient obtains candidate direct-download formats for the specified client.
 //
 // "Downloadable" means the format has a supported direct URL and no challenge
-// detected by this implementation. A complete transfer still needs validation.
+// detected or an applicable challenge successfully transformed by a configured solver.
+// A complete transfer still needs validation.
 func (e *Extractor) ExtractDownloadableWithClient(
 	ctx context.Context,
 	u *url.URL,
@@ -41,10 +43,14 @@ func (e *Extractor) ExtractDownloadableWithClient(
 
 	profile, _ := GetClientProfile(clientName)
 
+	// Snapshot configured solver for the duration of this extraction.
+	solver := e.Solver()
+
+	var watchHTML []byte
 	var player *playerResponse
 
 	if clientName == ClientWeb {
-		player, err = e.fetchWatchPagePlayer(ctx, id)
+		player, watchHTML, err = e.fetchWatchPagePlayerAndHTML(ctx, id)
 		if err != nil {
 			return nil, classifyExtractionFailure(clientName, err)
 		}
@@ -89,10 +95,169 @@ func (e *Extractor) ExtractDownloadableWithClient(
 		player.StreamingData.AdaptiveFormats...,
 	)
 
+	var unchallenged []candidateFormat
+	var challenged []candidateFormat
+
 	for _, raw := range rawFormats {
-		format, ok := convertDirectFormat(raw, profile)
-		if ok {
+		cand, ok := parseCandidateFormat(raw)
+		if !ok {
+			continue
+		}
+		if cand.isChallenged {
+			challenged = append(challenged, cand)
+		} else {
+			unchallenged = append(unchallenged, cand)
+		}
+	}
+
+	// 1. Convert direct unchallenged candidates immediately.
+	for _, cand := range unchallenged {
+		if format, ok := convertResolvedFormat(cand.raw, cand.directURL, profile); ok {
 			media.Formats = append(media.Formats, format)
+		}
+	}
+
+	// 2. If challenged formats exist and a solver is configured, solve challenges.
+	if len(challenged) > 0 && solver != nil {
+		if len(watchHTML) == 0 {
+			watchHTML, err = e.fetchWatchPageHTML(ctx, id)
+			if err != nil {
+				if len(media.Formats) == 0 {
+					return nil, classifyExtractionFailure(clientName, err)
+				}
+				return media, nil
+			}
+		}
+
+		scriptURL, sErr := DiscoverPlayerScriptURL(watchHTML)
+		if sErr != nil {
+			if len(media.Formats) == 0 {
+				return nil, classifyExtractionFailure(clientName, sErr)
+			}
+			return media, nil
+		}
+
+		script, fErr := e.fetchPlayerScript(ctx, scriptURL)
+		if fErr != nil {
+			if len(media.Formats) == 0 {
+				return nil, classifyExtractionFailure(clientName, fErr)
+			}
+			return media, nil
+		}
+
+		// Build deduplicated batch.
+		batch := ChallengeBatch{}
+		sigToID := make(map[string]string)
+		nToID := make(map[string]string)
+		expectedSigIDs := make(map[string]bool)
+		expectedNIDs := make(map[string]bool)
+
+		for _, cand := range challenged {
+			if len(batch.Signatures)+len(batch.NParams) >= MaxChallengeBatchSize {
+				break
+			}
+			if cand.hasSig {
+				if _, exists := sigToID[cand.cipherS]; !exists {
+					sigID := fmt.Sprintf("sig-%d", len(batch.Signatures))
+					sigToID[cand.cipherS] = sigID
+					expectedSigIDs[sigID] = true
+					batch.Signatures = append(batch.Signatures, SignatureChallenge{
+						ID:           sigID,
+						CipherString: cand.cipherS,
+						TargetParam:  cand.cipherSP,
+					})
+				}
+			}
+			if cand.hasN {
+				if _, exists := nToID[cand.nVal]; !exists {
+					nID := fmt.Sprintf("n-%d", len(batch.NParams))
+					nToID[cand.nVal] = nID
+					expectedNIDs[nID] = true
+					batch.NParams = append(batch.NParams, NChallenge{
+						ID:       nID,
+						RawValue: cand.nVal,
+					})
+				}
+			}
+		}
+
+		solverResult, solveErr := solver.SolveChallenges(ctx, script, batch)
+		if solveErr != nil {
+			if len(media.Formats) == 0 {
+				return nil, classifyExtractionFailure(clientName, fmt.Errorf("challenge solver: %w", solveErr))
+			}
+			return media, nil
+		}
+
+		// Validate solver output against batch requests.
+		validatedSigs := make(map[string]string)
+		for id, res := range solverResult.Signatures {
+			if !expectedSigIDs[id] || res.ID != id || res.Error != nil || res.Deciphered == "" || len(res.Deciphered) > MaxTransformedValueLength {
+				continue
+			}
+			validatedSigs[id] = res.Deciphered
+		}
+
+		validatedNParams := make(map[string]string)
+		for id, res := range solverResult.NParams {
+			if !expectedNIDs[id] || res.ID != id || res.Error != nil || res.Transformed == "" || len(res.Transformed) > MaxTransformedValueLength {
+				continue
+			}
+			validatedNParams[id] = res.Transformed
+		}
+
+		// Apply validated results to each challenged candidate.
+		for _, cand := range challenged {
+			var decipheredSig string
+			var transformedN string
+			failed := false
+
+			if cand.hasSig {
+				sigID := sigToID[cand.cipherS]
+				deciphered, ok := validatedSigs[sigID]
+				if !ok {
+					failed = true
+				} else {
+					decipheredSig = deciphered
+				}
+			}
+
+			if cand.hasN && !failed {
+				nID := nToID[cand.nVal]
+				transformed, ok := validatedNParams[nID]
+				if !ok {
+					failed = true
+				} else {
+					transformedN = transformed
+				}
+			}
+
+			if failed {
+				continue
+			}
+
+			targetRaw := cand.cipherURL
+			if targetRaw == "" {
+				targetRaw = cand.directURL
+			}
+
+			parsedURL, err := url.Parse(targetRaw)
+			if err != nil {
+				continue
+			}
+
+			q := parsedURL.Query()
+			if cand.hasSig {
+				q.Set(cand.cipherSP, decipheredSig)
+			}
+			if cand.hasN {
+				q.Set("n", transformedN)
+			}
+			parsedURL.RawQuery = q.Encode()
+
+			if format, ok := convertResolvedFormat(cand.raw, parsedURL.String(), profile); ok {
+				media.Formats = append(media.Formats, format)
+			}
 		}
 	}
 
@@ -103,23 +268,134 @@ func (e *Extractor) ExtractDownloadableWithClient(
 	return media, nil
 }
 
+type candidateFormat struct {
+	raw          playerFormat
+	directURL    string
+	cipherURL    string
+	cipherS      string
+	cipherSP     string
+	hasSig       bool
+	hasN         bool
+	nVal         string
+	isChallenged bool
+}
+
+func parseCandidateFormat(raw playerFormat) (candidateFormat, bool) {
+	if len(raw.DRMFamilies) > 0 {
+		return candidateFormat{}, false
+	}
+
+	// Reject conflicting simultaneous cipher formats.
+	if raw.SignatureCipher != "" && raw.Cipher != "" {
+		return candidateFormat{}, false
+	}
+
+	cipher := raw.SignatureCipher
+	if cipher == "" {
+		cipher = raw.Cipher
+	}
+
+	if cipher != "" {
+		q, err := url.ParseQuery(cipher)
+		if err != nil {
+			return candidateFormat{}, false
+		}
+
+		// Reject ambiguous duplicate critical fields even when their values match.
+		if len(q["url"]) > 1 || len(q["s"]) > 1 || len(q["sp"]) > 1 {
+			return candidateFormat{}, false
+		}
+
+		rawURL := q.Get("url")
+		s := q.Get("s")
+		sp := q.Get("sp")
+		if sp == "" {
+			sp = "sig" // authoritative YouTube fallback parameter (yt-dlp youtube.py)
+		}
+
+		if rawURL == "" || s == "" {
+			return candidateFormat{}, false
+		}
+
+		parsedMediaURL, err := url.Parse(rawURL)
+		if err != nil || parsedMediaURL.Hostname() == "" || parsedMediaURL.User != nil ||
+			(parsedMediaURL.Scheme != "https" && parsedMediaURL.Scheme != "http") {
+			return candidateFormat{}, false
+		}
+
+		// Reject duplicate n parameters in the media URL query.
+		if len(parsedMediaURL.Query()["n"]) > 1 {
+			return candidateFormat{}, false
+		}
+
+		nVal := parsedMediaURL.Query().Get("n")
+		hasN := nVal != ""
+
+		return candidateFormat{
+			raw:          raw,
+			cipherURL:    rawURL,
+			cipherS:      s,
+			cipherSP:     sp,
+			hasSig:       true,
+			hasN:         hasN,
+			nVal:         nVal,
+			isChallenged: true,
+		}, true
+	}
+
+	if raw.URL != "" {
+		parsed, err := url.Parse(raw.URL)
+		if err != nil || parsed.Hostname() == "" || parsed.User != nil ||
+			(parsed.Scheme != "https" && parsed.Scheme != "http") {
+			return candidateFormat{}, false
+		}
+
+		// Reject duplicate n parameters in the direct URL query.
+		if len(parsed.Query()["n"]) > 1 {
+			return candidateFormat{}, false
+		}
+
+		nVal := parsed.Query().Get("n")
+		hasN := nVal != ""
+
+		return candidateFormat{
+			raw:          raw,
+			directURL:    raw.URL,
+			hasSig:       false,
+			hasN:         hasN,
+			nVal:         nVal,
+			isChallenged: hasN,
+		}, true
+	}
+
+	return candidateFormat{}, false
+}
+
 func convertDirectFormat(
 	raw playerFormat,
 	profile ClientProfile,
 ) (goyt.Format, bool) {
-	if raw.URL == "" ||
-		raw.SignatureCipher != "" ||
-		raw.Cipher != "" ||
-		len(raw.DRMFamilies) > 0 {
+	cand, ok := parseCandidateFormat(raw)
+	if !ok || cand.isChallenged {
+		return goyt.Format{}, false
+	}
+	return convertResolvedFormat(raw, cand.directURL, profile)
+}
+
+func convertResolvedFormat(
+	raw playerFormat,
+	resolvedURL string,
+	profile ClientProfile,
+) (goyt.Format, bool) {
+	if resolvedURL == "" || len(raw.DRMFamilies) > 0 {
 		return goyt.Format{}, false
 	}
 
-	u, err := url.Parse(raw.URL)
+	u, err := url.Parse(resolvedURL)
 	if err != nil ||
 		u.Hostname() == "" ||
 		u.User != nil ||
-		(u.Scheme != "https" && u.Scheme != "http") ||
-		u.Query().Get("n") != "" {
+		(u.Scheme != "https" && u.Scheme != "http") {
 		return goyt.Format{}, false
 	}
 
@@ -162,7 +438,6 @@ func convertDirectFormat(
 			audioCodec = codec
 
 		default:
-			// Unknown codec composition cannot safely reach the planner.
 			return goyt.Format{}, false
 		}
 	}
@@ -176,8 +451,6 @@ func convertDirectFormat(
 		return goyt.Format{}, false
 	}
 
-	// Avoid silently treating a stream as video-only when its metadata says
-	// it also contains audio but its codec list is incomplete.
 	if audioCodec == "none" &&
 		(raw.AudioQuality != "" || raw.AudioChannels > 0) {
 		return goyt.Format{}, false
@@ -195,7 +468,7 @@ func convertDirectFormat(
 		VideoCodec: videoCodec,
 		AudioCodec: audioCodec,
 		Resource: goyt.Resource{
-			URL: raw.URL,
+			URL: resolvedURL,
 			Headers: http.Header{
 				"User-Agent": []string{userAgent},
 			},

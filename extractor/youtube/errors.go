@@ -19,6 +19,8 @@ const (
 	ErrCodeNChallengeRequired         = "n_challenge_required"
 	ErrCodeNChallengeReq              = ErrCodeNChallengeRequired
 	ErrCodeManifestUnavailable        = "manifest_unavailable"
+	ErrCodePlayerScriptUnavailable    = "player_script_unavailable"
+	ErrCodeChallengeSolverFailed      = "challenge_solver_failed"
 	ErrCodeInvalidPlayerResponse      = "invalid_player_response"
 	ErrCodeExtractionRequestFailed    = "extraction_request_failed"
 	ErrCodeContextCanceled            = "context_canceled"
@@ -177,9 +179,16 @@ func classifyExtractionFailure(client string, err error) error {
 	}
 
 	errStr := err.Error()
+	var code = ErrCodeExtractionRequestFailed
 	var publicMsg string
 
-	if match := httpStatusRegex.FindStringSubmatch(errStr); len(match) == 2 {
+	if strings.Contains(errStr, "player script") {
+		code = ErrCodePlayerScriptUnavailable
+		publicMsg = fmt.Sprintf("youtube: %s client could not discover or fetch the required player script", client)
+	} else if errors.Is(err, ErrInvalidSolverResult) || strings.Contains(errStr, "challenge solver") || strings.Contains(errStr, "solver") {
+		code = ErrCodeChallengeSolverFailed
+		publicMsg = fmt.Sprintf("youtube: %s client challenge solver failed", client)
+	} else if match := httpStatusRegex.FindStringSubmatch(errStr); len(match) == 2 {
 		publicMsg = fmt.Sprintf("youtube: %s player API returned HTTP %s", client, match[1])
 	} else if strings.Contains(errStr, "different video ID") {
 		publicMsg = fmt.Sprintf("youtube: %s player API returned a different video ID", client)
@@ -198,7 +207,7 @@ func classifyExtractionFailure(client string, err error) error {
 	}
 
 	return &ExtractionError{
-		Code:    ErrCodeExtractionRequestFailed,
+		Code:    code,
 		Client:  client,
 		Message: publicMsg,
 		Err:     err,
