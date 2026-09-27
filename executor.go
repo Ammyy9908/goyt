@@ -1,0 +1,405 @@
+package goyt
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// StreamDownloader is implemented by *Downloader.
+type StreamDownloader interface {
+	Download(
+		context.Context,
+		Resource,
+		string,
+		DownloadOptions,
+	) (*DownloadResult, error)
+}
+
+// MediaProcessor is implemented by *FFmpeg.
+type MediaProcessor interface {
+	Merge(context.Context, string, string, string) error
+	Remux(context.Context, string, string) error
+}
+
+// ExecutionError describes a failed plan execution.
+//
+// WorkDir identifies retained intermediate files, when applicable.
+// The underlying error remains available through errors.Is/errors.As.
+type ExecutionError struct {
+	Stage   string
+	WorkDir string
+	Err     error
+}
+
+func (e *ExecutionError) Error() string {
+	message := fmt.Sprintf("goyt: %s failed: %v", e.Stage, e.Err)
+
+	if e.WorkDir != "" {
+		message += "; intermediate files: " + e.WorkDir
+	}
+
+	return message
+}
+
+func (e *ExecutionError) Unwrap() error {
+	return e.Err
+}
+
+// ExecutionResult describes the completed output.
+type ExecutionResult struct {
+	Path      string
+	SizeBytes int64
+
+	// WorkDir is non-empty if successful processing left intermediate files
+	// because cleanup failed.
+	WorkDir string
+
+	// CleanupError does not mean the media operation failed.
+	CleanupError error
+}
+
+// ExecutionProgress identifies which input stream is being downloaded.
+//
+// StreamIndex is zero-based.
+// Download reports progress for that stream, not the whole job.
+// FFmpeg processing progress is not reported in this initial implementation.
+type ExecutionProgress struct {
+	StreamIndex int
+	StreamCount int
+	FormatID    string
+	Download    Progress
+}
+
+type ExecuteOptions struct {
+	Download DownloadOptions
+
+	// OnProgress runs synchronously during stream downloads.
+	OnProgress func(ExecutionProgress)
+}
+
+// Executor coordinates downloads and optional processing.
+//
+// Construct it with NewExecutor. Dependencies must be concurrency-safe
+// if an Executor is shared. Do not execute jobs for the same destination
+// concurrently.
+type Executor struct {
+	downloader StreamDownloader
+	processor  MediaProcessor
+}
+
+// NewExecutor accepts an optional processor.
+//
+// Without a processor, only direct-download plans can be executed.
+// Dependencies must be non-nil concrete instances, not typed nil pointers.
+func NewExecutor(
+	downloader StreamDownloader,
+	processor MediaProcessor,
+) (*Executor, error) {
+	if downloader == nil {
+		return nil, errors.New("goyt: downloader is required")
+	}
+
+	return &Executor{
+		downloader: downloader,
+		processor:  processor,
+	}, nil
+}
+
+// Execute downloads a plan and performs any required merge or remux.
+//
+// The output extension must match the planned container.
+// An existing destination is replaced only after its replacement is ready.
+//
+// Direct downloads retain their normal .part files after interruption.
+// Processing jobs retain a separate work directory after failure.
+// Resuming a later Execute call from that work directory is not yet implemented.
+func (e *Executor) Execute(
+	ctx context.Context,
+	plan *DownloadPlan,
+	destination string,
+	options ExecuteOptions,
+) (*ExecutionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if e == nil || e.downloader == nil {
+		return nil, errors.New("goyt: create Executor with NewExecutor first")
+	}
+
+	if err := validateExecutionPlan(plan, destination); err != nil {
+		return nil, err
+	}
+
+	if options.Download.MaxRetries < 0 ||
+		options.Download.RetryDelay < 0 {
+		return nil, errors.New("goyt: invalid retry options")
+	}
+
+	output, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	if info, err := os.Stat(output); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("goyt: destination must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	if plan.DirectDownloadable() {
+		result, err := e.downloader.Download(
+			ctx,
+			plan.Streams[0].Resource,
+			output,
+			executionDownloadOptions(options, plan, 0),
+		)
+		if err != nil {
+			return nil, &ExecutionError{
+				Stage: "download",
+				Err:   err,
+			}
+		}
+
+		if result == nil {
+			return nil, errors.New("goyt: downloader returned no result")
+		}
+
+		return &ExecutionResult{
+			Path:      result.Path,
+			SizeBytes: result.SizeBytes,
+		}, nil
+	}
+
+	if e.processor == nil {
+		return nil, errors.New(
+			"goyt: this plan requires a media processor",
+		)
+	}
+
+	workDir, err := os.MkdirTemp(
+		filepath.Dir(output),
+		".goyt-work-*",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	fail := func(stage string, err error) (*ExecutionResult, error) {
+		return nil, &ExecutionError{
+			Stage:   stage,
+			WorkDir: workDir,
+			Err:     err,
+		}
+	}
+
+	inputs := make([]string, len(plan.Streams))
+
+	for i, stream := range plan.Streams {
+		if err := ctx.Err(); err != nil {
+			return fail("download", err)
+		}
+
+		// FFmpeg detects the input format from its contents.
+		inputs[i] = filepath.Join(
+			workDir,
+			fmt.Sprintf("stream-%d.media", i),
+		)
+
+		_, err := e.downloader.Download(
+			ctx,
+			stream.Resource,
+			inputs[i],
+			executionDownloadOptions(options, plan, i),
+		)
+		if err != nil {
+			return fail(fmt.Sprintf("download stream %d", i), err)
+		}
+
+		info, err := os.Stat(inputs[i])
+		if err != nil {
+			return fail("inspect downloaded stream", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fail(
+				"inspect downloaded stream",
+				errors.New("downloaded stream is not a regular file"),
+			)
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("processing", err)
+	}
+
+	// Stage the processed result separately from the user's destination.
+	stagedOutput := filepath.Join(
+		workDir,
+		"output."+normalizeContainer(plan.OutputContainer),
+	)
+
+	if plan.NeedsMerge {
+		err = e.processor.Merge(
+			ctx,
+			inputs[0],
+			inputs[1],
+			stagedOutput,
+		)
+	} else {
+		err = e.processor.Remux(
+			ctx,
+			inputs[0],
+			stagedOutput,
+		)
+	}
+
+	if err != nil {
+		return fail("processing", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("processing", err)
+	}
+
+	info, err := os.Stat(stagedOutput)
+	if err != nil {
+		return fail("inspect processed output", err)
+	}
+
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fail(
+			"inspect processed output",
+			errors.New("processor produced no usable output"),
+		)
+	}
+
+	if err := os.Rename(stagedOutput, output); err != nil {
+		return fail("commit output", err)
+	}
+
+	result := &ExecutionResult{
+		Path:      output,
+		SizeBytes: info.Size(),
+	}
+
+	if err := os.RemoveAll(workDir); err != nil {
+		result.WorkDir = workDir
+		result.CleanupError = err
+	}
+
+	return result, nil
+}
+
+func executionDownloadOptions(
+	options ExecuteOptions,
+	plan *DownloadPlan,
+	index int,
+) DownloadOptions {
+	download := options.Download
+	original := download.OnProgress
+
+	download.OnProgress = func(progress Progress) {
+		if original != nil {
+			original(progress)
+		}
+
+		if options.OnProgress != nil {
+			options.OnProgress(ExecutionProgress{
+				StreamIndex: index,
+				StreamCount: len(plan.Streams),
+				FormatID:    plan.Streams[index].ID,
+				Download:    progress,
+			})
+		}
+	}
+
+	return download
+}
+
+func validateExecutionPlan(
+	plan *DownloadPlan,
+	destination string,
+) error {
+	if plan == nil {
+		return errors.New("goyt: download plan is nil")
+	}
+
+	if destination == "" {
+		return errors.New("goyt: destination is empty")
+	}
+
+	container := normalizeContainer(plan.OutputContainer)
+	switch container {
+	case "mp4", "webm", "mkv":
+	default:
+		return errors.New("goyt: unsupported output container")
+	}
+
+	extension := strings.TrimPrefix(
+		strings.ToLower(filepath.Ext(destination)),
+		".",
+	)
+	if extension != container {
+		return errors.New(
+			"goyt: destination extension does not match planned container",
+		)
+	}
+
+	switch len(plan.Streams) {
+	case 1:
+		if plan.NeedsMerge {
+			return errors.New("goyt: merge requires two streams")
+		}
+
+		stream := plan.Streams[0]
+
+		if !compatible(container, stream.VideoCodec, stream.AudioCodec) {
+			return errors.New("goyt: incompatible codecs in plan")
+		}
+
+		expectedRemux := normalizeContainer(stream.Container) != container
+		if plan.NeedsRemux != expectedRemux {
+			return errors.New("goyt: inconsistent remux flag")
+		}
+
+	case 2:
+		if !plan.NeedsMerge || plan.NeedsRemux {
+			return errors.New("goyt: inconsistent merge plan")
+		}
+
+		video := plan.Streams[0]
+		audio := plan.Streams[1]
+
+		if normalizeCodec(video.AudioCodec) != "none" ||
+			normalizeCodec(audio.VideoCodec) != "none" ||
+			!compatible(container, video.VideoCodec, audio.AudioCodec) {
+			return errors.New(
+				"goyt: merge plan must contain video-only then audio-only",
+			)
+		}
+
+	default:
+		return errors.New("goyt: plan must contain one or two streams")
+	}
+
+	for _, stream := range plan.Streams {
+		if stream.Protocol != ProtocolHTTP {
+			return fmt.Errorf(
+				"goyt: executor does not support protocol %q yet",
+				stream.Protocol,
+			)
+		}
+
+		if !usableResource(stream) {
+			return errors.New("goyt: invalid stream resource")
+		}
+	}
+
+	return nil
+}

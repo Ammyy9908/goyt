@@ -1,0 +1,16 @@
+/bin/
+/goyt
+/goyt-hls
+/goyt-inspect
+/coverage.out
+/coverage.html
+*.test
+.DS_Store
+.env
+.env.*
+!.env.example
+/compat-results/
+*.mp4
+*.part
+*.part.json
+/.goyt-*/

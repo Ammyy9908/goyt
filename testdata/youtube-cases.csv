@@ -1,0 +1,4 @@
+name,url,height,transport
+bbb-hls-retry,https://www.youtube.com/watch?v=YE7VzlLtp-4,720,hls
+making-http-retry,https://www.youtube.com/watch?v=6qKZw8oPoiE,720,http
+making-hls-retry,https://www.youtube.com/watch?v=6qKZw8oPoiE,720,hls
