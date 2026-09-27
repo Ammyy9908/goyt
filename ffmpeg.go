@@ -130,7 +130,7 @@ func (f *FFmpeg) Remux(
 	)
 }
 
-// HasEncoder checks if the specified audio encoder is available in FFmpeg.
+// HasEncoder checks if the specified encoder is available in FFmpeg.
 func (f *FFmpeg) HasEncoder(ctx context.Context, encoder string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -161,12 +161,12 @@ func (f *FFmpeg) HasEncoder(ctx context.Context, encoder string) (bool, error) {
 		if len(trimmed) < 8 {
 			continue
 		}
-		// Audio encoders start with A in flag position (index 1 in " A....D")
-		// e.g. "A....D aac" or " A....D libmp3lame"
+		// Encoders start with flag position (e.g. "V.....", "V....D", "A....D", "S.....")
+		// where V = Video, A = Audio, S = Subtitle.
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 2 {
 			flags := fields[0]
-			if strings.HasPrefix(flags, "A") || (len(flags) >= 2 && flags[0] == 'A') {
+			if len(flags) >= 6 && (flags[0] == 'V' || flags[0] == 'A' || flags[0] == 'S') {
 				encName := strings.ToLower(fields[1])
 				if encName == encoder {
 					return true, nil

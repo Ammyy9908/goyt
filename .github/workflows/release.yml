@@ -54,7 +54,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release view "$RELEASE_TAG"
 
-      - name: Install FFmpeg and verify required audio encoders
+      - name: Install FFmpeg and verify required media encoders
         shell: bash
         run: |
           sudo apt-get update
@@ -64,7 +64,7 @@ jobs:
 
           encoder_list="$(ffmpeg -hide_banner -encoders 2>&1)"
 
-          for enc in aac alac flac libmp3lame libopus libvorbis pcm_s16le; do
+          for enc in aac alac flac libmp3lame libopus libvorbis pcm_s16le libx264 libvpx-vp9; do
             if ! awk -v wanted="$enc" '
               $2 == wanted { found = 1 }
               END { exit !found }

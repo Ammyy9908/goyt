@@ -610,12 +610,16 @@ Encoders:
  A..... = Audio
  S..... = Subtitle
  ------
+ V..... libsvtav1            SVT-AV1(Scalable Video Technology for AV1) encoder (codec av1)
+ V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)
+ V....D libvpx-vp9           libvpx VP9 (codec vp9)
  A....D aac                  AAC (Advanced Audio Coding)
  A....D alac                 ALAC (Apple Lossless Audio Codec)
  A....D flac                 FLAC (Free Lossless Audio Codec)
  A....D libmp3lame           libmp3lame MP3 (codec mp3)
  A....D libopus              libopus Opus (codec opus)
  A....D pcm_s16le            PCM signed 16-bit little-endian
+ S..... srt                  SubRip subtitle (codec subrip)
 `
 	ffmpeg := &FFmpeg{
 		path: "fake-ffmpeg",
@@ -627,7 +631,7 @@ Encoders:
 		},
 	}
 
-	for _, enc := range []string{"aac", "alac", "flac", "libmp3lame", "libopus", "pcm_s16le"} {
+	for _, enc := range []string{"libsvtav1", "libx264", "libvpx-vp9", "aac", "alac", "flac", "libmp3lame", "libopus", "pcm_s16le", "srt"} {
 		has, err := ffmpeg.HasEncoder(context.Background(), enc)
 		if err != nil || !has {
 			t.Errorf("expected encoder %q to be found, got has=%v, err=%v", enc, has, err)
