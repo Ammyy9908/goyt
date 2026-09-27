@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag, e.g. v0.1.0-rc.1"
+        description: "Existing release tag, e.g. v0.1.0-rc.2"
         required: true
         type: string
 
@@ -106,13 +106,10 @@ jobs:
               extension=".exe"
             fi
 
-            for command in goyt goyt-inspect goyt-hls
-            do
-              GOOS="$target_os" GOARCH="$target_arch" \
-                go build -trimpath \
-                -o "$package_dir/${command}${extension}" \
-                "./cmd/$command"
-            done
+            GOOS="$target_os" GOARCH="$target_arch" \
+              go build -trimpath \
+              -o "$package_dir/goyt${extension}" \
+              ./cmd/goyt
 
             cp README.md LICENSE "$package_dir/"
 

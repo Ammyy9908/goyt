@@ -15,8 +15,6 @@ test-race:
 build:
 	mkdir -p bin
 	go build -o bin/goyt ./cmd/goyt
-	go build -o bin/goyt-inspect ./cmd/goyt-inspect
-	go build -o bin/goyt-hls ./cmd/goyt-hls
 
 run:
 	go run ./cmd/goyt

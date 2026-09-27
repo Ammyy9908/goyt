@@ -1,6 +1,6 @@
 # goyt
 
-`goyt` is a native Go media extraction and download library with command-line tools for YouTube media retrieval, format planning, resilient downloads, and FFmpeg-backed remuxing and verification.
+`goyt` is a native Go media extraction and download library with a consolidated command-line tool for YouTube media retrieval, format planning, resilient downloads, stream inspection, and FFmpeg-backed remuxing and verification.
 
 ## License
 
@@ -17,16 +17,14 @@ MIT. See [LICENSE](LICENSE).
 
 ## Build & Test
 
-Build all canonical binaries:
+Build the consolidated binary:
 
 ```sh
 make build
 ```
 
-This generates binaries in `./bin/`:
-- `bin/goyt` — Primary download CLI
-- `bin/goyt-inspect` — YouTube format and diagnostic inspector
-- `bin/goyt-hls` — Direct HLS playlist downloader
+This generates the executable in `./bin/`:
+- `bin/goyt` — Consolidated media download, inspection, and HLS CLI
 
 Run code formatting, static checks, and unit tests with race detection:
 
@@ -46,47 +44,80 @@ go test -race ./...
 
 ## CLI Usage
 
-### 1. `goyt` (Canonical Downloader)
+`goyt` provides subcommands for downloading, inspecting YouTube streams, and downloading arbitrary HLS playlists, as well as root help and version flags.
+
+### 1. `goyt download` (YouTube Downloader)
 
 Downloads a YouTube video using either direct HTTP streams or HLS transport:
 
 ```sh
 # Download via direct HTTP streams (merges separate video and audio streams)
-./bin/goyt -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport http -height 1080 -out video.mp4
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport http -height 1080 -out video.mp4
 
 # Download via HLS manifest with full decode verification
-./bin/goyt -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -height 1080 -out video.mp4 -decode-check
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -height 1080 -out video.mp4 -decode-check
 
-# Display version
-./bin/goyt -version
+# Download with explicit audio language selection
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -audio-language en -height 1080 -out video.mp4
 ```
 
 **Flags:**
 - `-url`: YouTube video URL (required).
 - `-transport`: Download transport protocol: `http` or `hls` (default `http`).
 - `-height`: Maximum desired video height in pixels (default `1080`).
+- `-audio-language`: HLS audio language tag, e.g. `en` or `en-US` (requires `-transport hls`).
 - `-out`: Destination file path, must have an `.mp4` extension (default `video.mp4`).
 - `-decode-check`: Optionally decodes the entire output after verification to check for frame errors.
 - `-version`: Print `goyt` version.
 
-### 2. `goyt-inspect` (Diagnostic Inspector)
+**Legacy Shorthand:**
+The legacy shorthand format without a subcommand is fully preserved:
+```sh
+./bin/goyt -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport http -height 1080 -out video.mp4
+```
 
-Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signature/N-parameter challenge requirements, and client profile responses:
+### 2. `goyt inspect` (Diagnostic Inspector)
+
+Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signature/N-parameter challenge requirements, player audio tracks, HLS renditions, and client profile responses:
 
 ```sh
 # Inspect using default (all) client profiles:
-./bin/goyt-inspect -url "https://www.youtube.com/watch?v=VIDEO_ID"
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Inspect specific client profile (web or visionos):
-./bin/goyt-inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client visionos
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client visionos
 ```
 
-### 3. `goyt-hls` (Direct HLS Playlist Downloader)
+**Flags:**
+- `-url`: Public YouTube video URL (required).
+- `-client`: Client response to inspect: `web`, `visionos`, or `all` (default `all`).
+
+### 3. `goyt hls` (Direct HLS Playlist Downloader)
 
 Downloads arbitrary HLS master or media playlists directly from a URL:
 
 ```sh
-./bin/goyt-hls -url "https://example.com/playlist/master.m3u8" -height 1080 -out output.mp4
+./bin/goyt hls -url "https://example.com/playlist/master.m3u8" -height 1080 -out output.mp4
+```
+
+**Flags:**
+- `-url`: Completed MPEG-TS media playlist or master playlist URL (required).
+- `-height`: Maximum master-playlist variant height (default `1080`).
+- `-out`: Destination file path, must have an `.mp4` extension (default `hls.mp4`).
+
+### 4. Version & Help
+
+```sh
+# Print version
+./bin/goyt -version
+
+# Print general help and command list
+./bin/goyt -help
+
+# Subcommand-specific help
+./bin/goyt download -help
+./bin/goyt inspect -help
+./bin/goyt hls -help
 ```
 
 ---
@@ -106,14 +137,13 @@ Downloads arbitrary HLS master or media playlists directly from a URL:
 YouTube extraction depends on behavior that can change. Successful extraction
 does not guarantee that every discovered media URL will accept downloads.
 
-
 ## Audio Selection
 
 For HLS downloads, goyt prefers audio renditions whose names contain a
 recognized original-audio marker. This works regardless of the language.
 
 ```sh
-./bin/goyt \
+./bin/goyt download \
   -url "https://www.youtube.com/watch?v=VIDEO_ID" \
   -transport hls \
   -height 1080 \
@@ -130,7 +160,7 @@ The selected track may differ from the audio YouTube chooses in your browser.
 To explicitly request a language:
 
 ```sh
-./bin/goyt \
+./bin/goyt download \
   -url "https://www.youtube.com/watch?v=VIDEO_ID" \
   -transport hls \
   -audio-language en \
@@ -224,8 +254,7 @@ separate from automated PASS results.
 | --- | --- |
 | `github.com/ammyy9908/goyt` (root) | Core public API: `Downloader`, `Executor`, `Planner`, `HLSDownloader`, `FFmpeg`, `Verifier`, and data models. |
 | `extractor/youtube` | YouTube extractor implementation, Innertube API client, visitor data extraction, and HLS manifest extraction. |
-| `cmd/goyt` | Unified YouTube downloader CLI. |
-| `cmd/goyt-inspect` | Diagnostic inspection CLI for YouTube streams and client profiles. |
-| `cmd/goyt-hls` | Standalone HLS playlist download CLI for arbitrary streams. |
+| `internal/cli` | Consolidated CLI implementation: subcommands (`download`, `inspect`, `hls`), flag sets, and routing. |
+| `cmd/goyt` | Thin entry point for the unified `goyt` CLI binary. |
 | `scripts/` | Automated compatibility testing and verification runners (`check_youtube.py`). |
 | `testdata/` | Unit and integration test fixtures (including mock local HLS streams). |

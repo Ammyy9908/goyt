@@ -176,6 +176,7 @@ def main():
 
             command = [
                 str(binary),
+                "download",
                 "-url", case["url"],
                 "-transport", case["transport"],
                 "-height", str(case["height"]),

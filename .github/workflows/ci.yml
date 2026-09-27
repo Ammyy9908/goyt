@@ -64,8 +64,6 @@ jobs:
       - name: Build commands
         run: |
           go build -o ./bin/goyt ./cmd/goyt
-          go build -o ./bin/goyt-inspect ./cmd/goyt-inspect
-          go build -o ./bin/goyt-hls ./cmd/goyt-hls
 
       - name: Check primary CLI
         run: |

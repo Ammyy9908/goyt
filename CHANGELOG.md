@@ -18,14 +18,16 @@
 - Preference for HLS audio renditions explicitly marked original in their names.
 - Warnings for uncertain or ambiguous automatic audio selection.
 - YouTube inspection, generic HLS downloading, and compatibility-test tools.
-- Regression coverage for transfer interruption, cancellation, output
-  preservation, and audio selection.
+- Unified multi-subcommand CLI (`goyt download`, `goyt inspect`, `goyt hls`) with independent help.
+- Backward-compatible legacy flag shorthand (`goyt -url URL ...`).
+- Comprehensive regression coverage for command routing, help, validation, and error states.
 
 ### Changed
 
-- Consolidated YouTube downloading into cmd/goyt.
-- Retained cmd/goyt-inspect for diagnostics and cmd/goyt-hls for supported
-  direct playlist URLs.
+- Consolidated `goyt`, `goyt-inspect`, and `goyt-hls` binaries into a single unified `goyt` executable.
+- Moved CLI command handlers and flag parsing into `internal/cli`, keeping `cmd/goyt/main.go` as a thin entry point.
+- Updated build targets, CI workflow, release packaging, and documentation for the unified binary.
+- Updated release archives to contain strictly `goyt` (`goyt.exe` on Windows), `README.md`, and `LICENSE`.
 - Allowed optional subtitle references during audio/video-only HLS selection.
 
 ### Known Limitations
