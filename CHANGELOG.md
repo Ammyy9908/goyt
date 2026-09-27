@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Eliminated duplicate initial extraction on new persistent jobs (`-job-dir`) for both HLS and HTTP transports by passing the freshly resolved in-memory presentation directly into initial job execution, preventing redundant network extraction requests and avoiding immediate spurious generation bumps to `gen-2` before downloading begins.
+- Fixed persistent job resume instructions to print directly runnable shell commands formatting the resolved executable binary path (via `os.Executable()`, symlink resolution, and argument quoting) and absolute job directory path safely across POSIX and Windows shells, including paths containing spaces and quotes.
+- Clarified HLS presentation restart diagnostics on standard error to explicitly report that previously completed segments cannot be reused because remote byte compatibility could not be established across changed signed URLs.
+- Documented persistent HLS job behavior and limitations: in-memory reuse on initial execution, reuse within an unchanged generation when compatibility checks pass, safe full restart when signed URLs or playlist structure change, offline processing when all inputs are completed, and verified completed-output recognition.
+
 ## [0.1.0-rc.6] - 2026-09-27
 
 ### Added

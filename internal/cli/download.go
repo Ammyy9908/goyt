@@ -200,7 +200,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		err = goyt.ExecuteJob(ctx, absJobDir, runnerOpts)
 		if err != nil {
 			if !errors.Is(err, goyt.ErrCompletedOutputMismatch) && !errors.Is(err, goyt.ErrJobLocked) && !errors.Is(err, goyt.ErrInvalidManifest) && !errors.Is(err, goyt.ErrUnsupportedManifestVersion) && !errors.Is(err, goyt.ErrInvalidJobPath) {
-				fmt.Fprintf(stderr, "To resume this job, run:\n  goyt download -resume-job %s\n", *resumeJob)
+				execPath := ResolveExecutablePath()
+				fmt.Fprintf(stderr, "To resume this job, run:\n  %s\n", FormatResumeCommand(execPath, absJobDir))
 			}
 			return err
 		}
@@ -349,6 +350,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		fmt.Fprintln(stdout, "Job directory:", absJobDir)
 
 		var manifest *goyt.JobManifest
+		var initialMedia *goyt.Media
+		var initialTracks []*goyt.HLSTrack
+
 		if *transport == "hls" {
 			if *audioOnly {
 				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
@@ -370,6 +374,10 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
+				}
+
+				if track != nil {
+					initialTracks = []*goyt.HLSTrack{track}
 				}
 
 				resolvedSpec, err := goyt.ResolveAudioOutputSpec(*audioFormat, "aac", qualPtr, *audioBitrate)
@@ -427,6 +435,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					return err
 				}
 
+				if resolved.Video != nil {
+					initialTracks = []*goyt.HLSTrack{resolved.Video}
+					if resolved.Audio != nil {
+						initialTracks = append(initialTracks, resolved.Audio)
+					}
+				}
+
 				videoSel := goyt.Selection{
 					MaxHeight:     *height,
 					VideoCodec:    "h264",
@@ -451,6 +466,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					return err
 				}
 
+				initialMedia = media
 				fmt.Fprintln(stdout, "Title:", media.Title)
 				audioSel := goyt.AudioSelection{
 					AudioLanguage: *audioLanguage,
@@ -494,6 +510,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					return err
 				}
 
+				initialMedia = media
 				fmt.Fprintln(stdout, "Title:", media.Title)
 				videoSel := goyt.Selection{
 					MaxHeight:     *height,
@@ -540,15 +557,18 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				MaxRetries:   2,
 				StallTimeout: *stallTimeout,
 			},
-			URLRefreshes: *urlRefreshes,
-			Stdout:       stdout,
-			Stderr:       stderr,
+			URLRefreshes:             *urlRefreshes,
+			Stdout:                   stdout,
+			Stderr:                   stderr,
+			InitialMedia:             initialMedia,
+			InitialResolvedHLSTracks: initialTracks,
 		}
 
 		err = goyt.ExecuteJob(ctx, absJobDir, runnerOpts)
 		if err != nil {
-			if !errors.Is(err, goyt.ErrJobLocked) && !errors.Is(err, goyt.ErrInvalidManifest) && !errors.Is(err, goyt.ErrUnsupportedManifestVersion) {
-				fmt.Fprintf(stderr, "To resume this job, run:\n  goyt download -resume-job %s\n", *jobDir)
+			if !errors.Is(err, goyt.ErrJobLocked) && !errors.Is(err, goyt.ErrInvalidManifest) && !errors.Is(err, goyt.ErrUnsupportedManifestVersion) && !errors.Is(err, goyt.ErrCompletedOutputMismatch) && !errors.Is(err, goyt.ErrInvalidJobPath) {
+				execPath := ResolveExecutablePath()
+				fmt.Fprintf(stderr, "To resume this job, run:\n  %s\n", FormatResumeCommand(execPath, absJobDir))
 			}
 			return err
 		}

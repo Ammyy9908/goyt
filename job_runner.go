@@ -21,15 +21,17 @@ type HLSExtractor func(ctx context.Context, u *url.URL) (Resource, *Media, error
 
 // JobRunnerOptions contains operational dependencies and settings for executing a job.
 type JobRunnerOptions struct {
-	Extractor    StreamExtractor
-	HLSExtractor HLSExtractor
-	Downloader   *Downloader
-	Processor    *FFmpeg
-	Verifier     *Verifier
-	Options      DownloadOptions
-	URLRefreshes int
-	Stdout       io.Writer
-	Stderr       io.Writer
+	Extractor                StreamExtractor
+	HLSExtractor             HLSExtractor
+	Downloader               *Downloader
+	Processor                *FFmpeg
+	Verifier                 *Verifier
+	Options                  DownloadOptions
+	URLRefreshes             int
+	Stdout                   io.Writer
+	Stderr                   io.Writer
+	InitialMedia             *Media
+	InitialResolvedHLSTracks []*HLSTrack
 }
 
 // ExecuteJob runs or resumes a persistent job in jobDir to completion.
@@ -109,35 +111,58 @@ func executeHTTPJob(ctx context.Context, jobDir string, manifest *JobManifest, o
 	// 3. Re-extract fresh playback info if any stream is incomplete.
 	currentResources := make([]Resource, len(manifest.Streams))
 	if needExtraction {
-		if opts.Extractor == nil {
-			return errors.New("goyt: extractor is required to resume incomplete job")
-		}
-
-		u, err := url.Parse(manifest.SourceURL)
-		if err != nil {
-			return fmt.Errorf("invalid source URL %q: %w", manifest.SourceURL, err)
-		}
-
-		fmt.Fprintln(opts.Stdout, "Extracting fresh playback URLs for incomplete streams...")
-		media, err := opts.Extractor(ctx, u)
-		if err != nil {
-			return err
-		}
-		if media.ID != manifest.VideoID {
-			return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", media.ID, manifest.VideoID)
-		}
-
-		for i := range manifest.Streams {
-			s := &manifest.Streams[i]
-			if s.Completed {
-				continue
+		allSatisfied := false
+		if opts.InitialMedia != nil && opts.InitialMedia.ID == manifest.VideoID {
+			satisfied := true
+			for i := range manifest.Streams {
+				s := &manifest.Streams[i]
+				if s.Completed {
+					continue
+				}
+				origFormat := IdentityToFormat(s.Format, Resource{})
+				matched, err := MatchRefreshedFormat(origFormat, opts.InitialMedia.Formats)
+				if err != nil || (matched.Resource.ExpiresAt != nil && !matched.Resource.ExpiresAt.After(time.Now())) {
+					satisfied = false
+					break
+				}
+				currentResources[i] = matched.Resource
 			}
-			origFormat := IdentityToFormat(s.Format, Resource{})
-			matched, err := MatchRefreshedFormat(origFormat, media.Formats)
+			if satisfied {
+				allSatisfied = true
+			}
+		}
+
+		if !allSatisfied {
+			if opts.Extractor == nil {
+				return errors.New("goyt: extractor is required to resume incomplete job")
+			}
+
+			u, err := url.Parse(manifest.SourceURL)
 			if err != nil {
-				return fmt.Errorf("%w: stream %d (%s): %v", ErrSelectionUnavailable, i+1, origFormat.ID, err)
+				return fmt.Errorf("invalid source URL %q: %w", manifest.SourceURL, err)
 			}
-			currentResources[i] = matched.Resource
+
+			fmt.Fprintln(opts.Stdout, "Extracting fresh playback URLs for incomplete streams...")
+			media, err := opts.Extractor(ctx, u)
+			if err != nil {
+				return err
+			}
+			if media.ID != manifest.VideoID {
+				return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", media.ID, manifest.VideoID)
+			}
+
+			for i := range manifest.Streams {
+				s := &manifest.Streams[i]
+				if s.Completed {
+					continue
+				}
+				origFormat := IdentityToFormat(s.Format, Resource{})
+				matched, err := MatchRefreshedFormat(origFormat, media.Formats)
+				if err != nil {
+					return fmt.Errorf("%w: stream %d (%s): %v", ErrSelectionUnavailable, i+1, origFormat.ID, err)
+				}
+				currentResources[i] = matched.Resource
+			}
 		}
 	}
 
@@ -421,87 +446,131 @@ func executeHLSJob(ctx context.Context, jobDir string, manifest *JobManifest, op
 		return processHLSOutput(ctx, jobDir, manifest, opts)
 	}
 
-	// 3. Incomplete job needs fresh HLS manifest extraction.
-	if opts.HLSExtractor == nil {
-		return errors.New("goyt: HLS extractor is required to resume incomplete HLS job")
-	}
+	var resolvedTracks []*HLSTrack
+	var hlsDownloader *HLSDownloader
 
-	u, err := url.Parse(manifest.SourceURL)
-	if err != nil {
-		return fmt.Errorf("invalid source URL %q: %w", manifest.SourceURL, err)
-	}
-
-	fmt.Fprintln(opts.Stdout, "Extracting fresh HLS playback URLs for incomplete job...")
-	manifestRes, media, err := opts.HLSExtractor(ctx, u)
-	if err != nil {
-		return err
-	}
-	if media.ID != manifest.VideoID {
-		return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", media.ID, manifest.VideoID)
-	}
-
-	hlsDownloader, err := NewHLSDownloader(opts.Downloader.client, opts.Processor)
-	if err != nil {
-		return err
-	}
-
-	// Resolve refreshed presentation
-	resolvedTracks, restartReason, err := resolveRefreshedHLSTracks(ctx, hlsDownloader, manifest, manifestRes)
-	if err != nil {
-		return err
-	}
-
-	// 4. Compare playlist structure & URL fingerprints for conservative reuse
-	restartGeneration := false
-	if restartReason != "" {
-		restartGeneration = true
-	} else {
-		if len(resolvedTracks) != len(manifest.HLS.Tracks) {
-			restartGeneration = true
-			restartReason = "track count changed"
-		} else {
-			for i := range manifest.HLS.Tracks {
-				savedTrack := &manifest.HLS.Tracks[i]
-				freshTrack := resolvedTracks[i]
-				if len(freshTrack.Playlist.Segments) != len(savedTrack.Segments) {
-					restartGeneration = true
-					restartReason = fmt.Sprintf("track %d segment count changed (%d -> %d)", i, len(savedTrack.Segments), len(freshTrack.Playlist.Segments))
+	// Check if we have valid in-memory initial resolved tracks matching the manifest
+	useInitialTracks := false
+	if len(opts.InitialResolvedHLSTracks) > 0 && len(opts.InitialResolvedHLSTracks) == len(manifest.HLS.Tracks) {
+		tracksMatch := true
+		for i := range manifest.HLS.Tracks {
+			savedTrack := &manifest.HLS.Tracks[i]
+			initTrack := opts.InitialResolvedHLSTracks[i]
+			if initTrack == nil || initTrack.Playlist == nil || len(initTrack.Playlist.Segments) != len(savedTrack.Segments) {
+				tracksMatch = false
+				break
+			}
+			for j := range savedTrack.Segments {
+				savedSeg := savedTrack.Segments[j]
+				initSeg := initTrack.Playlist.Segments[j]
+				if math.Abs(savedSeg.DurationSeconds-initSeg.Duration.Seconds()) > 0.0001 {
+					tracksMatch = false
 					break
 				}
-				for j := range savedTrack.Segments {
-					savedSeg := savedTrack.Segments[j]
-					freshSeg := freshTrack.Playlist.Segments[j]
-					if math.Abs(savedSeg.DurationSeconds-freshSeg.Duration.Seconds()) > 0.0001 {
-						restartGeneration = true
-						restartReason = fmt.Sprintf("track %d segment %d duration changed", i, j)
-						break
-					}
-					freshFingerprint := ComputeURLFingerprint(freshSeg.URL)
-					if freshFingerprint != savedSeg.URLFingerprint {
-						restartGeneration = true
-						restartReason = "segment URLs or tokens changed"
-						break
-					}
-				}
-				if restartGeneration {
+				if ComputeURLFingerprint(initSeg.URL) != savedSeg.URLFingerprint {
+					tracksMatch = false
 					break
 				}
 			}
+			if !tracksMatch {
+				break
+			}
+		}
+		if tracksMatch {
+			useInitialTracks = true
+			resolvedTracks = opts.InitialResolvedHLSTracks
 		}
 	}
 
-	if restartGeneration {
-		newGen := manifest.HLS.Generation + 1
-		fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): %s. Restarting download.\n", newGen, restartReason)
-		manifest.HLS.Generation = newGen
-		rebuildHLSTracks(manifest.HLS, resolvedTracks, newGen)
-		if err := manifest.Save(jobDir); err != nil {
-			return err
-		}
-		reusedSegments = 0
-	} else {
+	if useInitialTracks {
 		if reusedSegments > 0 {
 			fmt.Fprintf(opts.Stdout, "Reusing %d completed segments; %d remaining to download.\n", reusedSegments, totalSegments-reusedSegments)
+		}
+	} else {
+		// 3. Incomplete job needs fresh HLS manifest extraction.
+		if opts.HLSExtractor == nil {
+			return errors.New("goyt: HLS extractor is required to resume incomplete HLS job")
+		}
+
+		u, err := url.Parse(manifest.SourceURL)
+		if err != nil {
+			return fmt.Errorf("invalid source URL %q: %w", manifest.SourceURL, err)
+		}
+
+		fmt.Fprintln(opts.Stdout, "Extracting fresh HLS playback URLs for incomplete job...")
+		manifestRes, media, err := opts.HLSExtractor(ctx, u)
+		if err != nil {
+			return err
+		}
+		if media.ID != manifest.VideoID {
+			return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", media.ID, manifest.VideoID)
+		}
+
+		var errDL error
+		hlsDownloader, errDL = NewHLSDownloader(opts.Downloader.client, opts.Processor)
+		if errDL != nil {
+			return errDL
+		}
+
+		// Resolve refreshed presentation
+		var restartReason string
+		resolvedTracks, restartReason, err = resolveRefreshedHLSTracks(ctx, hlsDownloader, manifest, manifestRes)
+		if err != nil {
+			return err
+		}
+
+		// 4. Compare playlist structure & URL fingerprints for conservative reuse
+		restartGeneration := false
+		if restartReason != "" {
+			restartGeneration = true
+		} else {
+			if len(resolvedTracks) != len(manifest.HLS.Tracks) {
+				restartGeneration = true
+				restartReason = "track count changed"
+			} else {
+				for i := range manifest.HLS.Tracks {
+					savedTrack := &manifest.HLS.Tracks[i]
+					freshTrack := resolvedTracks[i]
+					if len(freshTrack.Playlist.Segments) != len(savedTrack.Segments) {
+						restartGeneration = true
+						restartReason = fmt.Sprintf("track %d segment count changed (%d -> %d)", i, len(savedTrack.Segments), len(freshTrack.Playlist.Segments))
+						break
+					}
+					for j := range savedTrack.Segments {
+						savedSeg := savedTrack.Segments[j]
+						freshSeg := freshTrack.Playlist.Segments[j]
+						if math.Abs(savedSeg.DurationSeconds-freshSeg.Duration.Seconds()) > 0.0001 {
+							restartGeneration = true
+							restartReason = fmt.Sprintf("track %d segment %d duration changed", i, j)
+							break
+						}
+						freshFingerprint := ComputeURLFingerprint(freshSeg.URL)
+						if freshFingerprint != savedSeg.URLFingerprint {
+							restartGeneration = true
+							restartReason = "segment URLs or tokens changed"
+							break
+						}
+					}
+					if restartGeneration {
+						break
+					}
+				}
+			}
+		}
+
+		if restartGeneration {
+			newGen := manifest.HLS.Generation + 1
+			fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): %s. Previously completed segments will not be reused because remote compatibility could not be established.\n", newGen, restartReason)
+			manifest.HLS.Generation = newGen
+			rebuildHLSTracks(manifest.HLS, resolvedTracks, newGen)
+			if err := manifest.Save(jobDir); err != nil {
+				return err
+			}
+			reusedSegments = 0
+		} else {
+			if reusedSegments > 0 {
+				fmt.Fprintf(opts.Stdout, "Reusing %d completed segments; %d remaining to download.\n", reusedSegments, totalSegments-reusedSegments)
+			}
 		}
 	}
 
@@ -596,13 +665,21 @@ downloadLoop:
 							return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", newMedia.ID, manifest.VideoID)
 						}
 
+						if hlsDownloader == nil {
+							var dlInitErr error
+							hlsDownloader, dlInitErr = NewHLSDownloader(opts.Downloader.client, opts.Processor)
+							if dlInitErr != nil {
+								return dlInitErr
+							}
+						}
+
 						newResolvedTracks, _, resErr := resolveRefreshedHLSTracks(ctx, hlsDownloader, manifest, newManifestRes)
 						if resErr != nil {
 							return resErr
 						}
 
 						newGen := manifest.HLS.Generation + 1
-						fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): URL refresh. Restarting download.\n", newGen)
+						fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): URL refresh. Previously completed segments will not be reused because remote compatibility could not be established.\n", newGen)
 						manifest.HLS.Generation = newGen
 						rebuildHLSTracks(manifest.HLS, newResolvedTracks, newGen)
 						if err := manifest.Save(jobDir); err != nil {

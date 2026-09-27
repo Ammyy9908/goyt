@@ -1439,4 +1439,185 @@ func TestHLSJobIntegration(t *testing.T) {
 			t.Fatalf("destination output file missing or empty: %v", err)
 		}
 	})
+
+	t.Run("initial execution does not perform duplicate extraction and stays at generation 1", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts\n#EXTINF:1.0,\n/seg1.ts\n#EXT-X-ENDLIST\n")
+			case "/seg0.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-no-dup")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsnodup",
+			"hlsnodup",
+			"HLS No Dup",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		var extractCallCount atomic.Int32
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				extractCallCount.Add(1)
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlsnodup", Title: "HLS No Dup"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			InitialResolvedHLSTracks: []*HLSTrack{resolved.Video},
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing job: %v", err)
+		}
+
+		if count := extractCallCount.Load(); count != 0 {
+			t.Fatalf("expected 0 HLSExtractor calls for new job with InitialResolvedHLSTracks, got: %d", count)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if loaded.HLS.Generation != 1 {
+			t.Fatalf("expected generation 1, got: %d", loaded.HLS.Generation)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("resume with changed URLs reports safe restart and compatibility explanation", func(t *testing.T) {
+		var token atomic.Value
+		token.Store("token-gen1")
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			curToken := token.Load().(string)
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts?tok=%s\n#EXTINF:1.0,\n/seg1.ts?tok=%s\n#EXT-X-ENDLIST\n", curToken, curToken)
+			case "/seg0.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-restart-diag")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsrestartdiag",
+			"hlsrestartdiag",
+			"HLS Restart Diag",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		// Now simulate resuming in a fresh process (InitialResolvedHLSTracks is nil)
+		// and token has changed on the server
+		token.Store("token-gen2")
+
+		var stderrBuf strings.Builder
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlsrestartdiag", Title: "HLS Restart Diag"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			Stderr: &stderrBuf,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing job: %v", err)
+		}
+
+		stderrStr := stderrBuf.String()
+		if !strings.Contains(stderrStr, "HLS presentation restart (generation 2): segment URLs or tokens changed") {
+			t.Errorf("expected stderr to contain restart reason, got:\n%s", stderrStr)
+		}
+		if !strings.Contains(stderrStr, "Previously completed segments will not be reused because remote compatibility could not be established") {
+			t.Errorf("expected stderr to contain compatibility explanation, got:\n%s", stderrStr)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if loaded.HLS.Generation != 2 {
+			t.Fatalf("expected generation 2, got: %d", loaded.HLS.Generation)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
 }

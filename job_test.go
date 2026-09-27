@@ -1,10 +1,13 @@
 package goyt
 
 import (
+	"context"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -554,4 +557,141 @@ func TestJobLockSubprocess(t *testing.T) {
 		t.Fatalf("expected lock acquisition after child death, got error: %v", err)
 	}
 	_ = lock.Close()
+}
+
+func TestHTTPInitialMediaNoDuplicateExtraction(t *testing.T) {
+	jobDir := filepath.Join(t.TempDir(), "job-http-no-dup")
+	destPath := filepath.Join(t.TempDir(), "output.mp4")
+
+	media := &Media{
+		ID:    "httpnodup",
+		Title: "HTTP No Dup",
+		Formats: []Format{
+			{
+				ID:        "18",
+				Protocol:  "http",
+				Container: "mp4",
+				Resource: Resource{
+					URL: "https://example.test/stream.mp4",
+				},
+			},
+		},
+	}
+
+	manifest, err := CreateVideoJob(
+		"https://www.youtube.com/watch?v=httpnodup",
+		"httpnodup",
+		"HTTP No Dup",
+		nil,
+		destPath,
+		&DownloadPlan{
+			MediaID:         "httpnodup",
+			Title:           "HTTP No Dup",
+			OutputContainer: "mp4",
+			Streams: []Format{
+				media.Formats[0],
+			},
+			NeedsMerge: false,
+			NeedsRemux: false,
+		},
+		Selection{Container: "mp4"},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(jobDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.Save(jobDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately to test pre-download extraction phase
+
+	var extractCount atomic.Int32
+	opts := JobRunnerOptions{
+		Extractor: func(ctx context.Context, u *url.URL) (*Media, error) {
+			extractCount.Add(1)
+			return media, nil
+		},
+		InitialMedia: media,
+	}
+
+	err = ExecuteJob(cancelCtx, jobDir, opts)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	if count := extractCount.Load(); count != 0 {
+		t.Fatalf("expected 0 Extractor calls when InitialMedia is provided, got: %d", count)
+	}
+}
+
+func TestHLSInitialResolvedTracksNoDuplicateExtraction(t *testing.T) {
+	jobDir := filepath.Join(t.TempDir(), "job-hls-unit-no-dup")
+	destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+	baseURL, _ := url.Parse("https://example.test/playlist.m3u8")
+	resolved := &ResolvedHLS{
+		Video: &HLSTrack{
+			BaseURL: baseURL,
+			Playlist: &HLSPlaylist{
+				Segments: []HLSSegment{
+					{URL: "https://example.test/seg0.ts", Duration: 1 * time.Second},
+				},
+				Duration: 1 * time.Second,
+			},
+		},
+	}
+
+	manifest, err := CreateHLSVideoJob(
+		"https://www.youtube.com/watch?v=hlsunitnodup",
+		"hlsunitnodup",
+		"HLS Unit No Dup",
+		destFile,
+		resolved,
+		Selection{MaxHeight: 1080},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(jobDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.Save(jobDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately to test pre-download extraction phase
+
+	var extractCount atomic.Int32
+	opts := JobRunnerOptions{
+		HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+			extractCount.Add(1)
+			return Resource{URL: "https://example.test/playlist.m3u8"}, &Media{ID: "hlsunitnodup", Title: "HLS Unit No Dup"}, nil
+		},
+		InitialResolvedHLSTracks: []*HLSTrack{resolved.Video},
+	}
+
+	err = ExecuteJob(cancelCtx, jobDir, opts)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+
+	if count := extractCount.Load(); count != 0 {
+		t.Fatalf("expected 0 HLSExtractor calls when InitialResolvedHLSTracks is provided, got: %d", count)
+	}
+
+	loaded, err := LoadJobManifest(jobDir)
+	if err != nil {
+		t.Fatalf("failed to load manifest: %v", err)
+	}
+	if loaded.HLS.Generation != 1 {
+		t.Fatalf("expected generation 1, got: %d", loaded.HLS.Generation)
+	}
 }

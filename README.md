@@ -411,14 +411,15 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Operational parameters (`-timeout`, `-stall-timeout`, `-url-refreshes`) may be overridden on resume; otherwise, stored operational defaults apply.
   - Each resumed invocation receives a fresh overall deadline and fresh URL refresh budget.
   - On cancellation (e.g. Ctrl+C), execution halts promptly while retaining resumable partial and completed stream/segment state.
+- **Initial Execution & Duplicate Extraction Elimination**:
+  - Newly created persistent jobs (`-job-dir DIR`) pass the freshly resolved presentation directly into initial execution in memory. Execution proceeds immediately without redundant network extraction or premature generation bumping.
 - **Conservative HLS Segment Reuse & Generation Isolation**:
-  - Reusing completed HLS segments across process restarts requires that:
-    1. Pinned variant and audio rendition identities match (`MatchRefreshedVariant`, `MatchRefreshedAudioRendition`).
-    2. Complete ordered playlist structure matches (segment count, segment durations, media sequence).
-    3. Every segment's resolved URL fingerprint matches its saved fingerprint (`hex(sha256(segment.URL))`).
-    4. Every reused local segment file passes byte size and SHA-256 local integrity verification.
-  - *URL Fingerprints*: `goyt` fingerprints the exact resolved segment URL using SHA-256 without persisting signed URLs, request headers, cookies, or tokens. This proves exact URL identity against the checkpointed playlist. It assumes that an unchanged VOD resource URL remains stable on the remote server; it is not cryptographic verification against the remote server.
-  - *Presentation Restart*: If signed URLs, query parameters, tokens, or playlist structures change upon re-extraction, the presentation restarts in an isolated new generation (e.g. `gen-1` -> `gen-2`). Old and refreshed segment generations are never mixed. The restart reason is clearly reported on standard error.
+  - Persistent HLS jobs support:
+    1. *Segment reuse*: Completed segments are reused within an unchanged presentation generation when compatibility checks pass (matching pinned variant/audio identities, ordered playlist structure, segment URL fingerprints, and local SHA-256 file integrity).
+    2. *Safe full restart*: If signed URLs, query parameters, tokens, or playlist structure change upon re-extraction in a new process or during URL refresh, the presentation safely restarts from segment 0 in an isolated new generation (e.g. `gen-1` -> `gen-2`). Old and refreshed segment generations are never mixed. Standard error clearly reports that previously completed segments will not be reused because remote compatibility could not be established.
+    3. *Offline processing*: When all segments across all tracks are complete and verified, packaging and verification proceed entirely offline without network extraction.
+    4. *Completed-output recognition*: Resuming a completed job verifies the final destination output identity without downloading.
+  - *URL Fingerprints*: `goyt` fingerprints the exact resolved segment URL using SHA-256 without persisting signed URLs, request headers, cookies, or tokens. This proves exact URL identity against the checkpointed playlist. It does not attempt to guess remote byte continuity when YouTube signs fresh URLs across process restarts.
 - **Completed Input Reuse & Offline Processing**:
   - Checkpointed HTTP streams or HLS segments marked complete are verified against their recorded SHA-256 integrity hash and byte size.
   - If all inputs/segments across all tracks are already complete and verified, merging/conversion, local playlist generation, and verification proceed entirely offline without requiring network extraction.
@@ -427,6 +428,8 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - When incomplete streams or segments exist, `goyt` re-extracts fresh media URLs using the canonical video ID.
   - Pinned format and variant matching ensures only the exact originally selected representation is matched. Best-format heuristics are never re-run.
   - Safe same-resource strong-ETag and byte-range resumes continue where possible for HTTP streams.
+- **Runnable Resume Command**:
+  - When a job is interrupted or fails, `goyt` prints a directly runnable command using the resolved executable binary path and absolute job directory with shell-appropriate argument quoting.
 - **Execution Stages & Crash Recovery**:
   - Stages tracked in manifest: `planned`, `downloading`, `processing`, `verifying`, `ready_to_commit`, and `completed`.
   - Incomplete processing outputs are discarded and re-processed safely.

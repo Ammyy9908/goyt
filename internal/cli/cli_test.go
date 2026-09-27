@@ -1661,7 +1661,7 @@ func TestDownloadCLI_PersistentJob_Lifecycle(t *testing.T) {
 		}
 
 		stderr1Str := stderr1.String()
-		if !strings.Contains(stderr1Str, "To resume this job, run:") || !strings.Contains(stderr1Str, "goyt download -resume-job") {
+		if !strings.Contains(stderr1Str, "To resume this job, run:") || !strings.Contains(stderr1Str, "download -resume-job") {
 			t.Fatalf("expected resume instructions in stderr, got: %s", stderr1Str)
 		}
 
