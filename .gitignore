@@ -11,6 +11,15 @@
 !.env.example
 /compat-results/
 *.mp4
+*.mkv
+*.webm
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.wav
+*.opus
+*.ogg
 *.part
 *.part.json
 /.goyt-*/
