@@ -18,60 +18,100 @@ type HLSExtraction struct {
 	Manifest goyt.Resource
 }
 
-// ExtractHLS discovers an HLS manifest without downloading its segments.
-//
-// This prototype supports public, non-live-related videos.
-// Finding a manifest does not establish that all its features are supported.
+// ExtractHLS discovers an HLS manifest using the default client (visionos).
 func (e *Extractor) ExtractHLS(
 	ctx context.Context,
 	u *url.URL,
 ) (*HLSExtraction, error) {
+	return e.ExtractHLSWithClient(ctx, u, DefaultClient)
+}
+
+// ExtractHLSWithClient discovers an HLS manifest for the specified client.
+//
+// Finding a manifest does not establish that all its features are supported.
+func (e *Extractor) ExtractHLSWithClient(
+	ctx context.Context,
+	u *url.URL,
+	clientName string,
+) (*HLSExtraction, error) {
+	clientName, err := ValidateClient(clientName)
+	if err != nil {
+		return nil, err
+	}
+
 	id, err := videoID(u)
 	if err != nil {
 		return nil, err
 	}
 
-	visitor, err := e.fetchVisitorData(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	profile, _ := GetClientProfile(clientName)
 
-	profile := visionOSProfile()
+	var player *playerResponse
 
-	player, err := e.requestPlayer(
-		ctx,
-		id,
-		profile,
-		visitor,
-	)
-	if err != nil {
-		return nil, err
+	if clientName == ClientWeb {
+		player, err = e.fetchWatchPagePlayer(ctx, id)
+		if err != nil {
+			return nil, classifyExtractionFailure(clientName, err)
+		}
+	} else {
+		visitor, vErr := e.fetchVisitorData(ctx, id)
+		if vErr != nil {
+			return nil, classifyExtractionFailure(clientName, vErr)
+		}
+
+		player, err = e.requestPlayer(
+			ctx,
+			id,
+			profile,
+			visitor,
+		)
+		if err != nil {
+			return nil, classifyExtractionFailure(clientName, err)
+		}
 	}
 
 	if player.PlayabilityStatus.Status != "OK" {
-		return nil, fmt.Errorf(
-			"youtube: playback status %s: %s",
+		return nil, classifyPlayabilityError(
+			clientName,
 			player.PlayabilityStatus.Status,
 			player.PlayabilityStatus.Reason,
 		)
 	}
 
 	if player.VideoDetails.IsLiveContent {
-		return nil, errors.New(
-			"youtube: live-related videos are not supported by this prototype",
-		)
+		return nil, &ExtractionError{
+			Code:           ErrCodeNoSupportedFormats,
+			Client:         clientName,
+			PlaybackStatus: player.PlayabilityStatus.Status,
+			Message:        "youtube: live-related videos are not supported by this prototype",
+		}
 	}
 
 	rawURL := player.StreamingData.HLSManifestURL
 	if rawURL == "" {
-		return nil, errors.New(
-			"youtube: this player response did not expose an HLS manifest",
-		)
+		return nil, &ExtractionError{
+			Code:    ErrCodeManifestUnavailable,
+			Client:  clientName,
+			Message: fmt.Sprintf("youtube: %s player response did not expose an HLS manifest", clientName),
+		}
 	}
 
 	manifest, err := youtubeManifestResource(rawURL, profile)
 	if err != nil {
-		return nil, err
+		if strings.Contains(err.Error(), "n parameter") {
+			return nil, &ExtractionError{
+				Code:    ErrCodeNChallengeReq,
+				Client:  clientName,
+				Message: fmt.Sprintf("youtube: %s HLS manifest requires an unsupported n-challenge", clientName),
+				Err:     err,
+			}
+		}
+		return nil, &ExtractionError{
+			Code:    ErrCodeInvalidPlayerResponse,
+			Client:  clientName,
+			Message: fmt.Sprintf("youtube: %s invalid HLS manifest: %v", clientName, err),
+			Err:     err,
+		}
 	}
 
 	return &HLSExtraction{
@@ -82,7 +122,7 @@ func (e *Extractor) ExtractHLS(
 
 func youtubeManifestResource(
 	rawURL string,
-	profile clientProfile,
+	profile ClientProfile,
 ) (goyt.Resource, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil ||
@@ -104,10 +144,15 @@ func youtubeManifestResource(
 		)
 	}
 
+	userAgent := profile.Context.UserAgent
+	if userAgent == "" {
+		userAgent = "Mozilla/5.0"
+	}
+
 	resource := goyt.Resource{
 		URL: rawURL,
 		Headers: http.Header{
-			"User-Agent": []string{profile.Context.UserAgent},
+			"User-Agent": []string{userAgent},
 		},
 	}
 

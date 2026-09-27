@@ -2,8 +2,6 @@ package youtube
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"mime"
 	"net/http"
 	"net/url"
@@ -14,43 +12,69 @@ import (
 	"github.com/ammyy9908/goyt"
 )
 
-// ExtractDownloadable obtains candidate direct-download formats.
-//
-// "Downloadable" means the format has a supported URL and no challenge
-// detected by this implementation. A complete transfer still needs validation.
+// ExtractDownloadable obtains candidate direct-download formats using the default client (visionos).
 func (e *Extractor) ExtractDownloadable(
 	ctx context.Context,
 	u *url.URL,
 ) (*goyt.Media, error) {
+	return e.ExtractDownloadableWithClient(ctx, u, DefaultClient)
+}
+
+// ExtractDownloadableWithClient obtains candidate direct-download formats for the specified client.
+//
+// "Downloadable" means the format has a supported direct URL and no challenge
+// detected by this implementation. A complete transfer still needs validation.
+func (e *Extractor) ExtractDownloadableWithClient(
+	ctx context.Context,
+	u *url.URL,
+	clientName string,
+) (*goyt.Media, error) {
+	clientName, err := ValidateClient(clientName)
+	if err != nil {
+		return nil, err
+	}
+
 	id, err := videoID(u)
 	if err != nil {
 		return nil, err
 	}
 
-	visitor, err := e.fetchVisitorData(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	profile, _ := GetClientProfile(clientName)
 
-	profile := visionOSProfile()
+	var player *playerResponse
 
-	player, err := e.requestPlayer(ctx, id, profile, visitor)
-	if err != nil {
-		return nil, err
+	if clientName == ClientWeb {
+		player, err = e.fetchWatchPagePlayer(ctx, id)
+		if err != nil {
+			return nil, classifyExtractionFailure(clientName, err)
+		}
+	} else {
+		visitor, vErr := e.fetchVisitorData(ctx, id)
+		if vErr != nil {
+			return nil, classifyExtractionFailure(clientName, vErr)
+		}
+
+		player, err = e.requestPlayer(ctx, id, profile, visitor)
+		if err != nil {
+			return nil, classifyExtractionFailure(clientName, err)
+		}
 	}
 
 	if player.PlayabilityStatus.Status != "OK" {
-		return nil, fmt.Errorf(
-			"youtube: playback status %s: %s",
+		return nil, classifyPlayabilityError(
+			clientName,
 			player.PlayabilityStatus.Status,
 			player.PlayabilityStatus.Reason,
 		)
 	}
 
 	if player.VideoDetails.IsLiveContent {
-		return nil, errors.New(
-			"youtube: this prototype does not support live-related videos",
-		)
+		return nil, &ExtractionError{
+			Code:           ErrCodeNoSupportedFormats,
+			Client:         clientName,
+			PlaybackStatus: player.PlayabilityStatus.Status,
+			Message:        "youtube: this prototype does not support live-related videos",
+		}
 	}
 
 	report := buildReport(id, player)
@@ -73,10 +97,7 @@ func (e *Extractor) ExtractDownloadable(
 	}
 
 	if len(media.Formats) == 0 {
-		return nil, errors.New(
-			"youtube: no supported direct formats; " +
-				"available streams may require challenges or another protocol",
-		)
+		return nil, classifyNoSupportedFormats(clientName, player)
 	}
 
 	return media, nil
@@ -84,7 +105,7 @@ func (e *Extractor) ExtractDownloadable(
 
 func convertDirectFormat(
 	raw playerFormat,
-	profile clientProfile,
+	profile ClientProfile,
 ) (goyt.Format, bool) {
 	if raw.URL == "" ||
 		raw.SignatureCipher != "" ||
@@ -162,6 +183,11 @@ func convertDirectFormat(
 		return goyt.Format{}, false
 	}
 
+	userAgent := profile.Context.UserAgent
+	if userAgent == "" {
+		userAgent = "Mozilla/5.0"
+	}
+
 	format := goyt.Format{
 		ID:         strconv.Itoa(raw.Itag),
 		Protocol:   goyt.ProtocolHTTP,
@@ -171,7 +197,7 @@ func convertDirectFormat(
 		Resource: goyt.Resource{
 			URL: raw.URL,
 			Headers: http.Header{
-				"User-Agent": []string{profile.Context.UserAgent},
+				"User-Agent": []string{userAgent},
 			},
 		},
 	}

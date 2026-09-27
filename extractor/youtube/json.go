@@ -105,18 +105,27 @@ func BuildInspectResponse(results []ClientInspectResult) InspectResponse {
 // BuildClientInspectResult converts an extraction Report or error into a ClientInspectResult.
 func BuildClientInspectResult(clientName string, report *Report, err error) ClientInspectResult {
 	if err != nil {
-		code := "extraction_failed"
-		switch {
-		case errors.Is(err, context.Canceled):
-			code = "context_canceled"
-		case errors.Is(err, context.DeadlineExceeded):
-			code = "timeout"
-		case errors.Is(err, ErrPlayerResponseMissing):
-			code = "player_response_missing"
-		}
-
-		// Ensure error message does not contain sensitive details and is sanitized
+		code := ErrCodeExtractionRequestFailed
 		msg := err.Error()
+
+		var extErr *ExtractionError
+		if errors.As(err, &extErr) {
+			if extErr.Code != "" {
+				code = extErr.Code
+			}
+			if extErr.Message != "" {
+				msg = extErr.Message
+			}
+		} else {
+			switch {
+			case errors.Is(err, context.Canceled):
+				code = ErrCodeContextCanceled
+			case errors.Is(err, context.DeadlineExceeded):
+				code = ErrCodeTimeout
+			case errors.Is(err, ErrPlayerResponseMissing):
+				code = ErrCodeInvalidPlayerResponse
+			}
+		}
 
 		return ClientInspectResult{
 			Client:                clientName,

@@ -114,6 +114,7 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 
 **Flags:**
 - `-url`: YouTube video URL (required for new jobs; rejected with `-resume-job`).
+- `-client`: YouTube extraction client profile: `visionos` or `web` (default `visionos`). Direct downloads only accept a single client (`all` is disallowed for downloads). The selected client is pinned across URL refreshes and persistent job resumes; no automatic client fallback is performed.
 - `-video-codec`: Video codec: `h264`, `vp9`, or `av1` (default `h264`). Explicit selection is strict; no silent fallback to another codec occurs if unavailable. Rejected with `-audio-only`.
 - `-container`: Video output container: `mp4`, `webm`, or `mkv` (default `mp4`). Rejected with `-audio-only`.
   - If `-container` is explicit, it is used.
@@ -253,9 +254,20 @@ Top-level structure:
 - **Original-Audio Heuristic**: The `original_hint` boolean reflects the existing heuristic (e.g. rendition name containing `(original)` or track ID containing `original`) with documented provenance; it does not represent verified creator provenance. If language metadata is not exposed by YouTube, `language` is left as `null` without guessing from display names.
 - **Exclusion of Sensitive Data**: JSON output uses an explicit field allowlist. It never emits signed media/manifest URLs, session cookies, authorization headers, visitor data identifiers (`VISITOR_DATA` / `X-Goog-Visitor-Id`), PO tokens, or raw API response payloads.
 - **Errors & Exit Codes**:
-  - If a requested client fails extraction, `status` is set to `"error"` with a structured `error` object (`code` and `message`), while successful client results in `-client all` mode are fully preserved.
+  - If a requested client fails extraction due to network/protocol errors or missing formats, `status` is set to `"error"` with a structured `error` object (`code` and `message`), while successful client results in `-client all` mode are fully preserved.
+  - Stable machine-readable error codes:
+    - `playback_restricted`: Playback restricted by YouTube (e.g. `LOGIN_REQUIRED` without bot check, `UNPLAYABLE`, age restriction, geographic blocking).
+    - `bot_check_required`: YouTube returned a bot-detection gate (e.g. "Sign in to confirm you’re not a bot").
+    - `no_supported_formats`: Response playability is OK but no direct media formats are supported.
+    - `signature_challenge_required`: Available formats require JavaScript signature cipher deciphering.
+    - `n_challenge_required`: Available formats or HLS manifest URLs require JavaScript N-parameter transformation.
+    - `manifest_unavailable`: Requested HLS stream does not expose a usable manifest URL.
+    - `invalid_player_response`: Watch page response is missing player metadata or has invalid JSON.
+    - `extraction_request_failed`: HTTP transport, connection, or protocol error.
+    - `context_canceled`: Operation canceled by context.
+    - `timeout`: Operation timed out.
   - If any requested client fails extraction, `goyt inspect` exits with a non-zero exit code.
-  - A restricted playback response (e.g., `LOGIN_REQUIRED` or `UNPLAYABLE`) is an inspected response returned with `status: "ok"` and `playback.status: "LOGIN_REQUIRED"`; it does not cause a non-zero exit code.
+  - A restricted playback response (e.g., `LOGIN_REQUIRED` or `UNPLAYABLE`) successfully fetched from YouTube is an inspected response returned with `status: "ok"` and `playback.status: "LOGIN_REQUIRED"`; it does not cause a non-zero exit code.
   - CLI argument parsing errors are printed to `stderr` with a non-zero exit code and emit no stdout output.
 
 ### 3. `goyt hls` (Direct HLS Playlist Downloader)
@@ -525,6 +537,8 @@ separate from automated PASS results.
 - No authenticated, members-only, DRM-protected, or live-video support.
 - No JavaScript signature/N-challenge solver or PO-token provider.
 - No DASH or SABR downloading.
+- No automatic client fallback or bypass: When YouTube returns a bot-check challenge (e.g. `LOGIN_REQUIRED` with "Sign in to confirm you’re not a bot", commonly observed on Oracle Cloud and datacenter IP ranges), `goyt` diagnoses the condition descriptively (`bot_check_required`) without claiming to bypass it, attempting challenge solving, or automatically falling back to another client.
+- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.

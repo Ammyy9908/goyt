@@ -573,6 +573,36 @@ ytcfg = {set: function(obj){}};
 ytcfg.set({"VISITOR_DATA": "mock-visitor-123"});
 </script></head><body></body></html>`
 
+func makeMockWatchPageWithDurationHTML(videoID, itag18URL, durationSeconds string) string {
+	return fmt.Sprintf(`<html><head><script>
+var ytInitialPlayerResponse = {
+	"videoDetails": {
+		"videoId": %q,
+		"title": "Mock YouTube Video",
+		"lengthSeconds": %q
+	},
+	"playabilityStatus": {
+		"status": "OK"
+	},
+	"streamingData": {
+		"formats": [
+			{
+				"itag": 18,
+				"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+				"qualityLabel": "360p",
+				"height": 360,
+				"width": 640,
+				"bitrate": 600000,
+				"url": %q
+			}
+		]
+	}
+};
+ytcfg = {set: function(obj){}};
+ytcfg.set({"VISITOR_DATA": "mock-visitor-123"});
+</script></head><body></body></html>`, videoID, durationSeconds, itag18URL)
+}
+
 const mockInnertubePlayerJSON = `{
 	"videoDetails": {
 		"videoId": "abcdefghijk",
@@ -776,8 +806,8 @@ func TestInspectCLI_PartialFailure_JSON(t *testing.T) {
 		if resp.Results[1].Client != "visionos" || resp.Results[1].Status != "error" || resp.Results[1].Error == nil {
 			t.Fatalf("expected visionos error, got: %+v", resp.Results[1])
 		}
-		if resp.Results[1].Error.Code != "extraction_failed" {
-			t.Fatalf("expected code extraction_failed, got %q", resp.Results[1].Error.Code)
+		if resp.Results[1].Error.Code != youtube.ErrCodeExtractionRequestFailed {
+			t.Fatalf("expected code %s, got %q", youtube.ErrCodeExtractionRequestFailed, resp.Results[1].Error.Code)
 		}
 	})
 }
@@ -1763,6 +1793,327 @@ func TestDownloadCLI_PersistentJob_Lifecycle(t *testing.T) {
 		}
 		if !strings.Contains(stdout3.String(), "Job already completed.") {
 			t.Fatalf("expected 'Job already completed.' notice, got: %s", stdout3.String())
+		}
+	})
+}
+
+func TestDownloadCLI_ClientFlagValidation(t *testing.T) {
+	tempDir := t.TempDir()
+	outFile := filepath.Join(tempDir, "out.mp4")
+
+	t.Run("rejects client all on download", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-client", "all",
+			"-out", outFile,
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for -client all on download, got nil")
+		}
+		if !strings.Contains(err.Error(), "unsupported client") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects unknown client on download", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-client", "android",
+			"-out", outFile,
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for -client android on download, got nil")
+		}
+		if !strings.Contains(err.Error(), "unsupported client") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects -client on -resume-job", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "dummy-job")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-resume-job", jobDir,
+			"-client", "web",
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error specifying -client with -resume-job, got nil")
+		}
+		if !strings.Contains(err.Error(), "flag -client cannot be specified with -resume-job") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestDownloadCLI_ClientRouting(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceMP4 := filepath.Join(tempDir, "source.mp4")
+
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	mockMediaData, err := os.ReadFile(sourceMP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var visionOSCalls atomic.Int32
+	var webCalls atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		// Web watch-page GET
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			webCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockWatchPageWithDurationHTML("abcdefghijk", "https://media.test/video.mp4", "1"))),
+				Request:    req,
+			}, nil
+		}
+
+		// VisionOS Innertube POST
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			visionOSCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerWithDurationJSON("abcdefghijk", "https://media.test/video.mp4", "1"))),
+				Request:    req,
+			}, nil
+		}
+
+		// Media request
+		if req.URL.Host == "media.test" {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Length": []string{fmt.Sprintf("%d", len(mockMediaData))}},
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				ContentLength: int64(len(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	t.Run("default download client is visionos", func(t *testing.T) {
+		visionOSCalls.Store(0)
+		webCalls.Store(0)
+
+		withMockTransport(t, transport, func() {
+			outFile := filepath.Join(tempDir, "default-visionos.mp4")
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", outFile,
+			}, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if visionOSCalls.Load() == 0 {
+				t.Fatal("expected visionos client to be called by default")
+			}
+		})
+	})
+
+	t.Run("explicit web download client routes to web", func(t *testing.T) {
+		visionOSCalls.Store(0)
+		webCalls.Store(0)
+
+		withMockTransport(t, transport, func() {
+			outFile := filepath.Join(tempDir, "explicit-web.mp4")
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-client", "web",
+				"-out", outFile,
+			}, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if webCalls.Load() == 0 {
+				t.Fatal("expected web client to be called with -client web")
+			}
+			if visionOSCalls.Load() != 0 {
+				t.Fatalf("expected visionos not to be called with -client web, got %d calls", visionOSCalls.Load())
+			}
+		})
+	})
+}
+
+func TestDownloadCLI_PersistentJob_ClientPreservation(t *testing.T) {
+	tempDir := t.TempDir()
+	jobDir := filepath.Join(tempDir, "job-web-persist")
+	outFile := filepath.Join(tempDir, "web-persist.mp4")
+	sourceMP4 := filepath.Join(tempDir, "source-persist.mp4")
+
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	mockMediaData, err := os.ReadFile(sourceMP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var visionOSCalls atomic.Int32
+	var webCalls atomic.Int32
+	var mediaCalls atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			webCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockWatchPageWithDurationHTML("abcdefghijk", "https://media.test/video.mp4", "1"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			visionOSCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerWithDurationJSON("abcdefghijk", "https://media.test/video.mp4", "1"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.Host == "media.test" {
+			count := mediaCalls.Add(1)
+			if count == 1 {
+				// Simulate failure on initial attempt to force pause or resume
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Body:       io.NopCloser(strings.NewReader("gateway error")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Length": []string{fmt.Sprintf("%d", len(mockMediaData))}},
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				ContentLength: int64(len(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		// Run 1: Create persistent job with -client web
+		var stdout1, stderr1 bytes.Buffer
+		_ = Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-client", "web",
+			"-job-dir", jobDir,
+			"-out", outFile,
+		}, &stdout1, &stderr1)
+
+		manifest, err := goyt.LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if manifest.Client != "web" {
+			t.Fatalf("expected saved manifest client 'web', got %q", manifest.Client)
+		}
+
+		// Reset counters before resume
+		visionOSCalls.Store(0)
+		webCalls.Store(0)
+
+		// Run 2: Resume job (no -client specified)
+		var stdout2, stderr2 bytes.Buffer
+		err = Run(context.Background(), []string{
+			"download",
+			"-resume-job", jobDir,
+		}, &stdout2, &stderr2)
+		if err != nil {
+			t.Fatalf("unexpected error resuming job: %v", err)
+		}
+
+		if visionOSCalls.Load() != 0 {
+			t.Fatalf("resume must not switch client to visionos, got %d calls", visionOSCalls.Load())
+		}
+	})
+}
+
+func TestDownloadCLI_OracleBotCheck_SafeDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	outFile := filepath.Join(tempDir, "oracle.mp4")
+
+	oracleResponseBody := `{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you’re not a bot","messages":["Sign in to confirm you’re not a bot. This helps protect our community."]}}`
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+		if req.Method == http.MethodPost {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(oracleResponseBody)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=oracle12345",
+			"-out", outFile,
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error on Oracle bot check response, got nil")
+		}
+
+		errStr := err.Error()
+		if !strings.Contains(errStr, "bot-check response") {
+			t.Fatalf("expected bot-check explanation in error, got: %s", errStr)
+		}
+		if !strings.Contains(errStr, "visionos") {
+			t.Fatalf("expected client name in error, got: %s", errStr)
+		}
+
+		// Ensure no secrets or raw JSON leaked
+		if strings.Contains(errStr, "protected our community") || strings.Contains(errStr, `"playabilityStatus"`) {
+			t.Fatalf("error exposed raw response body: %s", errStr)
 		}
 	})
 }

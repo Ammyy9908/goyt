@@ -149,6 +149,7 @@ type JobManifest struct {
 	UpdatedAt       time.Time        `json:"updated_at"`
 	SourceURL       string           `json:"source_url"`
 	VideoID         string           `json:"video_id"`
+	Client          string           `json:"client,omitempty"`
 	Title           string           `json:"title,omitempty"`
 	DurationSeconds *float64         `json:"duration_seconds,omitempty"`
 	DestinationPath string           `json:"destination_path"`
@@ -260,6 +261,7 @@ func CreateVideoJob(
 		UpdatedAt:       now,
 		SourceURL:       sourceURL,
 		VideoID:         videoID,
+		Client:          "visionos",
 		Title:           title,
 		DurationSeconds: durSec,
 		DestinationPath: absDest,
@@ -315,6 +317,7 @@ func CreateAudioJob(
 		UpdatedAt:       now,
 		SourceURL:       sourceURL,
 		VideoID:         videoID,
+		Client:          "visionos",
 		Title:           title,
 		DurationSeconds: durSec,
 		DestinationPath: absDest,
@@ -521,6 +524,7 @@ func CreateHLSVideoJob(
 		UpdatedAt:       now,
 		SourceURL:       sourceURL,
 		VideoID:         videoID,
+		Client:          "visionos",
 		Title:           title,
 		DurationSeconds: &durSec,
 		DestinationPath: absDest,
@@ -618,6 +622,7 @@ func CreateHLSAudioJob(
 		UpdatedAt:       now,
 		SourceURL:       sourceURL,
 		VideoID:         videoID,
+		Client:          "visionos",
 		Title:           title,
 		DurationSeconds: &durSec,
 		DestinationPath: absDest,
@@ -709,6 +714,10 @@ func LoadJobManifest(jobDir string) (*JobManifest, error) {
 		return nil, fmt.Errorf("%w: JSON unmarshal error: %v", ErrInvalidManifest, err)
 	}
 
+	if m.Client == "" {
+		m.Client = "visionos"
+	}
+
 	if err := m.Validate(jobDir); err != nil {
 		return nil, err
 	}
@@ -726,6 +735,12 @@ func (m *JobManifest) Validate(jobDir string) error {
 	}
 	if strings.TrimSpace(m.SourceURL) == "" || strings.TrimSpace(m.VideoID) == "" {
 		return fmt.Errorf("%w: missing source_url or video_id", ErrInvalidManifest)
+	}
+	if m.Client == "" {
+		m.Client = "visionos"
+	}
+	if strings.TrimSpace(m.Client) == "" {
+		return fmt.Errorf("%w: client cannot be empty or whitespace", ErrInvalidManifest)
 	}
 	if strings.TrimSpace(m.DestinationPath) == "" || !filepath.IsAbs(m.DestinationPath) {
 		return fmt.Errorf("%w: destination_path must be a non-empty absolute path", ErrInvalidManifest)

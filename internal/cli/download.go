@@ -20,6 +20,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	flags := flag.NewFlagSet("download", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
+	clientFlag := flags.String("client", "visionos", "YouTube client for extraction: visionos or web")
 	audioLanguage := flags.String(
 		"audio-language",
 		"",
@@ -45,8 +46,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
-  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -url URL [-client visionos|web] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
+  goyt download -url URL -audio-only [-client visionos|web] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
   goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
 		flags.PrintDefaults()
@@ -62,6 +63,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 
 	var (
+		clientSet                                                           bool
 		heightSet, audioFormatSet, audioQualitySet, audioBitrateSet, outSet bool
 		urlSet, transportSet, decodeSet, audioOnlySet, audioLanguageSet     bool
 		videoCodecSet, containerSet                                         bool
@@ -69,6 +71,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	)
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
+		case "client":
+			clientSet = true
 		case "url":
 			urlSet = true
 		case "out":
@@ -124,6 +128,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 
 		// Reject source/selection/output overrides
+		if clientSet {
+			return errors.New("flag -client cannot be specified with -resume-job (loaded from saved job)")
+		}
 		if urlSet {
 			return errors.New("flag -url cannot be specified with -resume-job (loaded from saved job)")
 		}
@@ -169,6 +176,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			return fmt.Errorf("%w: %s", goyt.ErrJobNotFound, *resumeJob)
 		}
 
+		savedManifest, err := goyt.LoadJobManifest(absJobDir)
+		normClient, err := youtube.ValidateClient(savedManifest.Client)
+		if err != nil {
+			return fmt.Errorf("%w: %v", goyt.ErrInvalidManifest, err)
+		}
+		resumeClient := normClient
+
 		if *timeout > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, *timeout)
@@ -186,11 +200,15 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		extractor := youtube.New(nil)
 
 		runnerOpts := goyt.JobRunnerOptions{
+			ClientValidator: func(c string) error {
+				_, err := youtube.ValidateClient(c)
+				return err
+			},
 			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
-				return extractor.ExtractDownloadable(ctx, u)
+				return extractor.ExtractDownloadableWithClient(ctx, u, resumeClient)
 			},
 			HLSExtractor: func(ctx context.Context, u *url.URL) (goyt.Resource, *goyt.Media, error) {
-				ext, err := extractor.ExtractHLS(ctx, u)
+				ext, err := extractor.ExtractHLSWithClient(ctx, u, resumeClient)
 				if err != nil {
 					return goyt.Resource{}, nil, err
 				}
@@ -359,6 +377,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
+	selectedClient, err := youtube.ValidateClient(*clientFlag)
+	if err != nil {
+		return err
+	}
+
 	extractor := youtube.New(nil)
 	if !extractor.Match(u) {
 		return errors.New("unsupported YouTube URL")
@@ -415,7 +438,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if *transport == "hls" {
 			if *audioOnly {
 				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
-				extracted, err := extractor.ExtractHLS(ctx, u)
+				extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -472,9 +495,10 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				manifest.Client = selectedClient
 			} else {
 				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
-				extracted, err := extractor.ExtractHLS(ctx, u)
+				extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -515,11 +539,12 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				manifest.Client = selectedClient
 			}
 		} else {
 			if *audioOnly {
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-				media, err := extractor.ExtractDownloadable(ctx, u)
+				media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -561,9 +586,10 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				manifest.Client = selectedClient
 			} else {
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-				media, err := extractor.ExtractDownloadable(ctx, u)
+				media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -588,6 +614,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				manifest.Client = selectedClient
 			}
 		}
 
@@ -597,11 +624,15 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 
 		runnerOpts := goyt.JobRunnerOptions{
+			ClientValidator: func(c string) error {
+				_, err := youtube.ValidateClient(c)
+				return err
+			},
 			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
-				return extractor.ExtractDownloadable(ctx, u)
+				return extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 			},
 			HLSExtractor: func(ctx context.Context, u *url.URL) (goyt.Resource, *goyt.Media, error) {
-				ext, err := extractor.ExtractHLS(ctx, u)
+				ext, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if err != nil {
 					return goyt.Resource{}, nil, err
 				}
@@ -685,7 +716,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		case "http":
 			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 
-			media, err := extractor.ExtractDownloadable(ctx, u)
+			media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 			if err != nil {
 				return err
 			}
@@ -777,7 +808,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 					fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-					newMedia, extractErr := extractor.ExtractDownloadable(ctx, u)
+					newMedia, extractErr := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 					if extractErr != nil {
 						return extractErr
 					}
@@ -838,7 +869,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 					fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-					newMedia, extractErr := extractor.ExtractDownloadable(ctx, u)
+					newMedia, extractErr := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 					if extractErr != nil {
 						return extractErr
 					}
@@ -859,7 +890,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		case "hls":
 			fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
 
-			extracted, err := extractor.ExtractHLS(ctx, u)
+			extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 			if err != nil {
 				return err
 			}
@@ -925,7 +956,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 					fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-					newExtracted, extractErr := extractor.ExtractHLS(ctx, u)
+					newExtracted, extractErr := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 					if extractErr != nil {
 						return extractErr
 					}
@@ -1070,7 +1101,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 					fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-					newExtracted, extractErr := extractor.ExtractHLS(ctx, u)
+					newExtracted, extractErr := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 					if extractErr != nil {
 						return extractErr
 					}
@@ -1121,7 +1152,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	case "http":
 		fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 
-		media, err := extractor.ExtractDownloadable(ctx, u)
+		media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 		if err != nil {
 			return err
 		}
@@ -1206,7 +1237,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 				fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-				newMedia, extractErr := extractor.ExtractDownloadable(ctx, u)
+				newMedia, extractErr := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 				if extractErr != nil {
 					return extractErr
 				}
@@ -1274,7 +1305,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 				fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-				newMedia, extractErr := extractor.ExtractDownloadable(ctx, u)
+				newMedia, extractErr := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
 				if extractErr != nil {
 					return extractErr
 				}
@@ -1300,7 +1331,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	case "hls":
 		fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
 
-		extracted, err := extractor.ExtractHLS(ctx, u)
+		extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 		if err != nil {
 			return err
 		}
@@ -1336,7 +1367,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 				fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-				newExtracted, extractErr := extractor.ExtractHLS(ctx, u)
+				newExtracted, extractErr := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if extractErr != nil {
 					return extractErr
 				}
@@ -1486,7 +1517,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintf(stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
 				fmt.Fprintln(stderr, "Restarting the affected transfer.")
 
-				newExtracted, extractErr := extractor.ExtractHLS(ctx, u)
+				newExtracted, extractErr := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if extractErr != nil {
 					return extractErr
 				}

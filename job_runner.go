@@ -30,6 +30,7 @@ type JobRunnerOptions struct {
 	URLRefreshes             int
 	Stdout                   io.Writer
 	Stderr                   io.Writer
+	ClientValidator          func(string) error
 	InitialMedia             *Media
 	InitialResolvedHLSTracks []*HLSTrack
 }
@@ -59,6 +60,12 @@ func ExecuteJob(ctx context.Context, jobDir string, opts JobRunnerOptions) error
 	manifest, err := LoadJobManifest(jobDir)
 	if err != nil {
 		return err
+	}
+
+	if opts.ClientValidator != nil {
+		if err := opts.ClientValidator(manifest.Client); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidManifest, err)
+		}
 	}
 
 	// 1. Check if job is already completed or if destination was committed right before a crash.

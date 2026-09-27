@@ -199,7 +199,7 @@ func TestBuildInspectResponse_PartialFailure(t *testing.T) {
 	if resp.Results[1].Client != "visionos" || resp.Results[1].Status != "error" {
 		t.Fatalf("unexpected visionos result: %+v", resp.Results[1])
 	}
-	if resp.Results[1].Error == nil || resp.Results[1].Error.Code != "extraction_failed" {
+	if resp.Results[1].Error == nil || resp.Results[1].Error.Code != ErrCodeExtractionRequestFailed {
 		t.Fatalf("unexpected error: %+v", resp.Results[1].Error)
 	}
 	if resp.Results[1].Media != nil || resp.Results[1].Playback != nil || resp.Results[1].Streaming != nil {
@@ -237,8 +237,8 @@ func TestBuildInspectResponse_TotalFailure(t *testing.T) {
 	if resp.Results[0].Status != "error" || resp.Results[0].Error == nil {
 		t.Fatalf("expected status error, got %+v", resp.Results[0])
 	}
-	if resp.Results[0].Error.Code != "extraction_failed" {
-		t.Fatalf("expected code extraction_failed, got %s", resp.Results[0].Error.Code)
+	if resp.Results[0].Error.Code != ErrCodeExtractionRequestFailed {
+		t.Fatalf("expected code %s, got %s", ErrCodeExtractionRequestFailed, resp.Results[0].Error.Code)
 	}
 }
 
@@ -534,10 +534,12 @@ func TestBuildInspectErrorDTO_Codes(t *testing.T) {
 		err          error
 		expectedCode string
 	}{
-		{context.Canceled, "context_canceled"},
-		{context.DeadlineExceeded, "timeout"},
-		{ErrPlayerResponseMissing, "player_response_missing"},
-		{errors.New("generic error"), "extraction_failed"},
+		{context.Canceled, ErrCodeContextCanceled},
+		{context.DeadlineExceeded, ErrCodeTimeout},
+		{ErrPlayerResponseMissing, ErrCodeInvalidPlayerResponse},
+		{errors.New("generic error"), ErrCodeExtractionRequestFailed},
+		{&ExtractionError{Code: ErrCodeBotCheckRequired, Message: "bot check"}, ErrCodeBotCheckRequired},
+		{&ExtractionError{Code: ErrCodeNoSupportedFormats, Message: "no formats"}, ErrCodeNoSupportedFormats},
 	}
 
 	for _, tc := range cases {

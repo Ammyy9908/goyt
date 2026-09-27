@@ -31,11 +31,14 @@ type playerRequest struct {
 	} `json:"playbackContext"`
 }
 
-// InspectVisionOS requests an additional player response.
-//
-// This initial implementation is unauthenticated. It does not import cookies,
-// solve challenges, provide PO tokens, or verify discovered media URLs.
 func (e *Extractor) InspectVisionOS(
+	ctx context.Context,
+	u *url.URL,
+) (*Report, error) {
+	return e.inspectVisionOS(ctx, u)
+}
+
+func (e *Extractor) inspectVisionOS(
 	ctx context.Context,
 	u *url.URL,
 ) (*Report, error) {
@@ -119,7 +122,7 @@ func (e *Extractor) InspectVisionOS(
 func (e *Extractor) requestPlayer(
 	ctx context.Context,
 	id string,
-	profile clientProfile,
+	profile ClientProfile,
 	visitorData ...string,
 ) (*playerResponse, error) {
 	if err := ctx.Err(); err != nil {

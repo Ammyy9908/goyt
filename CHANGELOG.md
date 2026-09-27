@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Centralized YouTube client registry in `extractor/youtube` consolidating client identities (`visionos`, `web`), headers, context configuration, and capability modeling (`MetadataInspection`, `DirectExtraction`, `HLSExtraction`, `SignatureDecipher`, `NChallengeSolve`, `POTokenProvider`).
+- Explicit client selection flag `-client visionos|web` in `goyt download` (default `visionos`, preserving existing download behavior).
+- Rejection of `-client all` and unknown client names in `goyt download` prior to network operations.
+- Preserved `goyt inspect -client web|visionos|all` (default `all`) and Schema 1 JSON inspection compatibility.
+- Typed extractor error `ExtractionError` with stable, machine-readable diagnostic error codes:
+  - `playback_restricted`: Playback restricted by YouTube (e.g. `LOGIN_REQUIRED` without bot-check marker, `UNPLAYABLE`, age gate, geographic restriction, or private video).
+  - `bot_check_required`: YouTube returned an explicit bot-check gate (e.g. "Sign in to confirm you’re not a bot").
+  - `no_supported_formats`: Response playability is OK but no direct formats are supported by goyt, preserving diagnostic obstacle list (`signature_challenge`, `n_challenge`, `sabr`, `drm`).
+  - `signature_challenge_required`: All potential formats require JavaScript signature deciphering.
+  - `n_challenge_required`: Formats or HLS manifest URLs require JavaScript N-parameter transformation.
+  - `manifest_unavailable`: Requested HLS stream does not expose a usable manifest URL.
+  - `invalid_player_response`: Watch page response is missing embedded player metadata or has invalid JSON.
+  - `extraction_request_failed`: HTTP transport or network communication failed.
+  - `context_canceled`: Operation canceled by context.
+  - `timeout`: Operation timed out.
+- Context cancellation and deadline error wrapping preserving `errors.Is(err, context.Canceled)` and `errors.Is(err, context.DeadlineExceeded)`.
+- Diagnostic safety policy sanitizing signed media/manifest URLs, query parameters, cookies, authorization headers, and visitor identifiers from public CLI and JSON error messages without leaking secrets or raw API responses.
+- Persistent job manifest extension saving `client` in `JobManifest`, ensuring legacy manifests without `client` default to `visionos`, rejecting `-client` flag overrides on `-resume-job`, and maintaining the pinned extraction client throughout job execution and URL refresh loops.
+- Comprehensive unit, integration, and CLI test coverage for client selection, structured errors, Oracle bot-check fixtures, diagnostic safety, legacy manifest loading, and refresh client preservation.
+
+### Fixed
+
+- Handled Oracle Ubuntu and cloud host bot-check responses descriptively, explaining that the selected client received a bot-check challenge without claiming to bypass or fix that response, promising automatic fallback, or advising infinite retries.
+
 ## [0.1.0-rc.7] - 2026-09-27
 
 ### Added

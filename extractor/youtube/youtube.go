@@ -224,9 +224,49 @@ func (e *Extractor) Inspect(
 	ctx context.Context,
 	u *url.URL,
 ) (*Report, error) {
+	return e.InspectWithClient(ctx, u, ClientWeb)
+}
+
+// InspectWithClient routes inspection through the requested client profile ("web" or "visionos").
+func (e *Extractor) InspectWithClient(
+	ctx context.Context,
+	u *url.URL,
+	clientName string,
+) (*Report, error) {
+	clientName, err := ValidateClient(clientName)
+	if err != nil {
+		return nil, err
+	}
+
+	if clientName == ClientWeb {
+		return e.inspectWeb(ctx, u)
+	}
+	return e.inspectVisionOS(ctx, u)
+}
+
+func (e *Extractor) inspectWeb(
+	ctx context.Context,
+	u *url.URL,
+) (*Report, error) {
 	id, err := videoID(u)
 	if err != nil {
 		return nil, err
+	}
+
+	player, err := e.fetchWatchPagePlayer(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildReport(id, player), nil
+}
+
+func (e *Extractor) fetchWatchPagePlayer(
+	ctx context.Context,
+	id string,
+) (*playerResponse, error) {
+	if !videoIDPattern.MatchString(id) {
+		return nil, errors.New("youtube: invalid video ID")
 	}
 
 	watchURL := "https://www.youtube.com/watch?v=" + id + "&hl=en"
@@ -280,7 +320,7 @@ func (e *Extractor) Inspect(
 		return nil, errors.New("youtube: response video ID does not match request")
 	}
 
-	return buildReport(id, player), nil
+	return player, nil
 }
 
 func parsePlayer(page []byte) (*playerResponse, error) {

@@ -46,10 +46,9 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return errors.New("usage: goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-json]")
 	}
 
-	switch *clientName {
-	case "web", "visionos", "all":
-	default:
-		return errors.New("client must be web, visionos, or all")
+	normClient, err := youtube.ValidateInspectClient(*clientName)
+	if err != nil {
+		return err
 	}
 
 	u, err := url.Parse(*source)
@@ -65,22 +64,16 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	clients := []string{*clientName}
-	if *clientName == "all" {
-		clients = []string{"web", "visionos"}
+	clients := []string{normClient}
+	if normClient == "all" {
+		clients = []string{youtube.ClientWeb, youtube.ClientVisionOS}
 	}
 
 	var results []youtube.ClientInspectResult
 	var failures []error
 
 	for _, name := range clients {
-		var report *youtube.Report
-
-		if name == "web" {
-			report, err = extractor.Inspect(ctx, u)
-		} else {
-			report, err = extractor.InspectVisionOS(ctx, u)
-		}
+		report, err := extractor.InspectWithClient(ctx, u, name)
 
 		if *jsonOutput {
 			results = append(results, youtube.BuildClientInspectResult(name, report, err))

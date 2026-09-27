@@ -3,6 +3,7 @@ package goyt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
@@ -406,6 +407,193 @@ func TestJobManifestValidation(t *testing.T) {
 		}
 		if !errors.Is(err, ErrJobNotFound) {
 			t.Fatalf("expected ErrJobNotFound, got: %v", err)
+		}
+	})
+}
+
+func TestJobManifestClient(t *testing.T) {
+	tempDir := t.TempDir()
+	destPath := filepath.Join(tempDir, "output.mp4")
+
+	t.Run("default client is visionos", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-client-default")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := CreateVideoJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"Test Video",
+			nil,
+			destPath,
+			&DownloadPlan{
+				MediaID:         "abcdefghijk",
+				Title:           "Test Video",
+				OutputContainer: "mp4",
+				Streams: []Format{
+					{ID: "18", Protocol: "http", Container: "mp4"},
+				},
+			},
+			Selection{MaxHeight: 360, Container: "mp4"},
+			false,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating job: %v", err)
+		}
+		if manifest.Client != "visionos" {
+			t.Fatalf("expected default client visionos, got %s", manifest.Client)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if loaded.Client != "visionos" {
+			t.Fatalf("expected loaded client visionos, got %s", loaded.Client)
+		}
+	})
+
+	t.Run("legacy manifest without client field defaults to visionos", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-legacy")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{
+			"schema_version": 1,
+			"job_id": "legacy-job-id",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + destPath + `",
+			"transport": "http",
+			"mode": "video",
+			"stage": "planned",
+			"streams": [
+				{"index": 0, "format": {"id": "18", "protocol": "http", "container": "mp4"}, "relative_path": "inputs/stream-0.media"}
+			]
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("unexpected error loading legacy manifest: %v", err)
+		}
+		if loaded.Client != "visionos" {
+			t.Fatalf("expected legacy manifest client to default to visionos, got %q", loaded.Client)
+		}
+	})
+
+	t.Run("manifest with explicit web client preserves client", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-web")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := CreateVideoJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"Test Video",
+			nil,
+			destPath,
+			&DownloadPlan{
+				MediaID:         "abcdefghijk",
+				Title:           "Test Video",
+				OutputContainer: "mp4",
+				Streams: []Format{
+					{ID: "18", Protocol: "http", Container: "mp4"},
+				},
+			},
+			Selection{MaxHeight: 360, Container: "mp4"},
+			false,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		manifest.Client = "web"
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if loaded.Client != "web" {
+			t.Fatalf("expected web client, got %s", loaded.Client)
+		}
+	})
+
+	t.Run("manifest with whitespace client fails validation", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-whitespace-client")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{
+			"schema_version": 1,
+			"job_id": "blank-client-job",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + destPath + `",
+			"transport": "http",
+			"client": "   ",
+			"mode": "video",
+			"stage": "planned",
+			"streams": [
+				{"index": 0, "format": {"id": "18", "protocol": "http", "container": "mp4"}, "relative_path": "inputs/stream-0.media"}
+			]
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatalf("expected error for whitespace client, got nil")
+		}
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("expected ErrInvalidManifest for whitespace client, got %v", err)
+		}
+	})
+
+	t.Run("ExecuteJob with ClientValidator rejects unsupported client", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-unsupported-client-exec")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{
+			"schema_version": 1,
+			"job_id": "bad-client-job",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + destPath + `",
+			"transport": "http",
+			"client": "unknown_client",
+			"mode": "video",
+			"stage": "planned",
+			"streams": [
+				{"index": 0, "format": {"id": "18", "protocol": "http", "container": "mp4"}, "relative_path": "inputs/stream-0.media"}
+			]
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := ExecuteJob(context.Background(), jobDir, JobRunnerOptions{
+			ClientValidator: func(c string) error {
+				if c != "visionos" && c != "web" {
+					return fmt.Errorf("unsupported client %q", c)
+				}
+				return nil
+			},
+		})
+		if err == nil {
+			t.Fatalf("expected error from ExecuteJob with unsupported client, got nil")
+		}
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("expected ErrInvalidManifest from ExecuteJob, got %v", err)
 		}
 	})
 }
