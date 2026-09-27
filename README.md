@@ -547,10 +547,13 @@ Challenge solving is enabled explicitly via the `-js-runtime` CLI flag:
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime auto
 
 # Explicit runtime selection
-./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime node
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime deno
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime node
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime bun
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime qjs
+
+# Custom executable path (explicit type prefix or recognizable basename)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime deno:/opt/bin/my-deno
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime /usr/local/bin/node
 
 # Inspect stream metadata with configured solver validation
@@ -561,18 +564,32 @@ Challenge solving is enabled explicitly via the `-js-runtime` CLI flag:
 - **URL Refresh**: The configured solver is automatically passed through URL re-extraction and persistent job resumption.
 - **Inspection Semantics**: Running `goyt inspect -js-runtime ...` validates solver configuration and reports detected challenge requirements without downloading media segments or declaring unresolved formats as verified.
 
+### Runtime Support & Isolation Matrix
+
+| Runtime | Tested Versions | Platforms / Arch Tested | Isolation Enforced by goyt | Known Limitations | Automated Test Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Deno** (Recommended) | Deno 2.x (`2.0.6`, `2.9.6`) | macOS (`arm64`), Linux (`amd64`) | **Configured Capability Sandbox**: `--no-prompt`, `--allow-read=<bundle-only>`. Denies network (`--allow-net`), file write (`--allow-write`), environment (`--allow-env`), and child processes (`--allow-run`). | Requires Deno binary on `PATH` or explicit path. Symlinked temp dirs require resolving realpaths. | **Executed in CI & Local** (includes automated behavioral sandbox denial tests). |
+| **Node.js** | Node `20.x` (`20.18.0`), `22.x`, `26.x` | macOS (`arm64`), Linux (`amd64`) | **Unconfined Subprocess**: Standard child process with direct argument passing (no shell). Bounded stdio (10MB stdout, 64KB stderr drain) and 15s deadline. | No fine-grained capability isolation without external OS containerization (cgroups/jails). | **Executed in CI & Local** (explicit Node backend test suite). |
+| **Bun** | Bun `1.x` (`1.1.x`) | macOS (`arm64`) | **Unconfined Subprocess**: Standard child process with direct argument passing, bounded stdio, and 15s deadline. | No fine-grained capability isolation. | **Executed locally** when installed; skipped if absent. |
+| **QuickJS** | `qjs` (2021+) | Linux (`amd64`), macOS (`arm64`) | **Unconfined Subprocess**: Lightweight C-based engine, bounded stdio, 15s deadline. | Slower AST parsing on very large player scripts; unconfined process. | **Executed locally** when installed; skipped if absent. |
+| *Untested Combinations* | Various | Windows (`amd64`, `arm64`) | Same command-line flag templates per runtime type. | Windows native runtime execution is not exercised in Linux/macOS CI (binaries cross-compile cleanly). | Documented gap; native smoke tests pending Windows CI runner. |
+
+### Runtime Selection & Custom Path Rules
+
+- **`auto` Selection**: Probes `PATH` in priority order: `deno` -> `node` -> `bun` -> `qjs`. `auto` prefers `deno` first to prioritize fine-grained capability isolation when available, falling back to `node` and other available engines.
+- **Custom Executable Paths**:
+  - Custom paths can specify the runtime type unambiguously using a prefix (e.g. `deno:/opt/bin/my-deno-bin`, `node:/usr/bin/node20`, `bun:/opt/bun/bin/bun`, `qjs:/usr/bin/qjs`).
+  - Without a prefix, `goyt` inspects the executable's basename for `deno`, `bun`, `qjs`/`quickjs`, or `node`.
+  - Unrecognized executable names without a type prefix are **strictly rejected** with an actionable error rather than silently defaulting to Node.
+
 ### Execution Boundaries & Security Model
 
-- **Self-Contained Embedded Bundle**: The AST solver engine (`yt-dlp-ejs` 0.8.0, `meriyah` 6.1.4, `astring` 1.9.0) is embedded directly inside the `goyt` binary and written to a secure temporary file (`0600` permissions) on demand. No external packages, Python extractors, or remote solver code are downloaded.
-- **Process Boundaries by Runtime**:
-  - **Deno (Sandboxed)**: Executed with `--no-prompt` and `--allow-read=<bundlePath>,<realPath>`. Network (`--allow-net`), file writing (`--allow-write`), environment (`--allow-env`), and subprocess creation (`--allow-run`) are disallowed.
-  - **Node.js, Bun, QuickJS**: Executed as standard child processes with direct argument passing (no shell). These runtimes do not enforce fine-grained capability sandboxing without external OS-level containerization (e.g. cgroups, namespaces, or jails).
-  - **Custom Paths**: When an explicit binary path is provided, the runtime kind is inferred from the binary's basename (`deno`, `bun`, `qjs`/`quickjs`, defaulting to `node`).
+- **Self-Contained Embedded Bundle**: The AST solver engine (`yt-dlp-ejs` 0.8.0, `meriyah` 6.1.4, `astring` 1.9.0) is embedded directly inside the single `goyt` binary and written to a secure temporary file (`0600` permissions) on demand. No external packages, Python extractors, or remote solver code are downloaded during execution.
 - **Resource Limits & Process Control**:
-  - Standard output is capped at **10 MB**. If output exceeds this threshold, the child process is terminated immediately and reaped.
-  - Standard error is captured up to **64 KB** and continuously drained to prevent process pipe deadlocks.
+  - Standard output is capped at **10 MB**. If output exceeds this threshold, the child process is terminated immediately.
+  - Standard error is continuously drained up to **64 KB** to prevent pipe deadlocks.
   - Invocations enforce a default **15-second deadline** with immediate process termination upon context cancellation.
-  - *Note*: Child process heap memory is not bounded by stdio limits; OS-level memory limits (e.g. `ulimit` or cgroups) apply.
+  - *Note*: Subprocess stdio limits and deadlines do **not** constitute OS heap-memory limits; operating system memory controls (e.g. `ulimit` or cgroups) apply.
 - **Version-Isolated In-Memory Cache**:
   - In-memory thread-safe LRU cache (capacity: 1,000 entries) eliminates redundant process invocations during multi-format extractions.
   - Cache keys are structured as `bundleVersion|scriptIdentity|challengeKind|inputVal`, where `scriptIdentity` incorporates `URL#sha256=HEX`.

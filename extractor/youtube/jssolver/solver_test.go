@@ -2,6 +2,8 @@ package jssolver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -301,48 +303,158 @@ func TestSolver_DenoSandboxFlags_ArgsValidation(t *testing.T) {
 	}
 }
 
+func TestResolveRuntime_PrefixAndUnknownTypeRejection(t *testing.T) {
+	// 1. Unrecognized executable without type prefix must be rejected
+	tmpDir := t.TempDir()
+	unknownExe := filepath.Join(tmpDir, "custom-unknown-engine")
+	if err := os.WriteFile(unknownExe, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("failed to create dummy executable: %v", err)
+	}
+
+	_, _, err := ResolveRuntime(unknownExe)
+	if err == nil {
+		t.Fatalf("expected error resolving unknown runtime %q, got nil", unknownExe)
+	}
+	if !strings.Contains(err.Error(), "cannot determine JavaScript runtime type") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 2. Explicit type prefix allows custom executable names
+	absPath, kind, err := ResolveRuntime("deno:" + unknownExe)
+	if err != nil {
+		t.Fatalf("expected successful resolution with deno: prefix, got: %v", err)
+	}
+	if kind != RuntimeDeno || absPath != unknownExe {
+		t.Fatalf("expected (deno, %q), got (%s, %q)", unknownExe, kind, absPath)
+	}
+
+	absPathNode, kindNode, err := ResolveRuntime("node:" + unknownExe)
+	if err != nil {
+		t.Fatalf("expected successful resolution with node: prefix, got: %v", err)
+	}
+	if kindNode != RuntimeNode || absPathNode != unknownExe {
+		t.Fatalf("expected (node, %q), got (%s, %q)", unknownExe, kindNode, absPathNode)
+	}
+
+	// 3. Basename recognition
+	denoExe := filepath.Join(tmpDir, "my-deno-v2")
+	if err := os.WriteFile(denoExe, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("failed to create dummy deno executable: %v", err)
+	}
+	_, kindDeno, err := ResolveRuntime(denoExe)
+	if err != nil || kindDeno != RuntimeDeno {
+		t.Fatalf("expected RuntimeDeno for %q, got (%s, %v)", denoExe, kindDeno, err)
+	}
+}
+
 func TestSolver_DenoSandbox_BehavioralForbiddenAccess(t *testing.T) {
 	denoPath, err := exec.LookPath("deno")
 	if err != nil {
+		if os.Getenv("GOYT_REQUIRE_DENO_RUNTIME") != "" {
+			t.Fatalf("expected Deno in CI environment, but not found: %v", err)
+		}
 		t.Skip("skipping Deno behavioral test: deno not found on host")
 	}
 
-	// Create a test script attempting prohibited filesystem, network, and environment access
-	tmpScript, err := os.CreateTemp("", "deno-sandbox-test-*.js")
+	// Create harmless local fixtures for testing read and write restrictions
+	tmpDir := t.TempDir()
+	forbiddenReadTarget := filepath.Join(tmpDir, "secret-data.txt")
+	if err := os.WriteFile(forbiddenReadTarget, []byte("TOP_SECRET"), 0600); err != nil {
+		t.Fatalf("failed to create read target: %v", err)
+	}
+	forbiddenWriteTarget := filepath.Join(tmpDir, "forbidden-output.txt")
+
+	// Create a test script attempting all prohibited operations:
+	// 1. Network access (fetch)
+	// 2. Unauthorized file read
+	// 3. Unauthorized file write
+	// 4. Environment variable access
+	// 5. Subprocess creation
+	tmpScript, err := os.CreateTemp("", "deno-sandbox-behavior-*.js")
 	if err != nil {
 		t.Fatalf("failed to create temp test script: %v", err)
 	}
 	defer os.Remove(tmpScript.Name())
 
-	scriptContent := `
+	scriptContent := fmt.Sprintf(`
+		const results = {};
+
+		// 1. Prohibited Network Access
 		try {
-			// Prohibited FS read outside allowed path
-			Deno.readTextFileSync("/etc/hosts");
-			console.log("SECURITY_BREACH: read /etc/hosts succeeded");
+			await fetch("http://127.0.0.1:1");
+			results.network = "BREACH";
 		} catch (e) {
-			console.log("DENO_SANDBOX_BLOCKED_FS");
+			results.network = "BLOCKED";
 		}
-	`
+
+		// 2. Prohibited Unauthorized File Read
+		try {
+			Deno.readTextFileSync(%q);
+			results.file_read = "BREACH";
+		} catch (e) {
+			results.file_read = "BLOCKED";
+		}
+
+		// 3. Prohibited Unauthorized File Write
+		try {
+			Deno.writeTextFileSync(%q, "MALICIOUS");
+			results.file_write = "BREACH";
+		} catch (e) {
+			results.file_write = "BLOCKED";
+		}
+
+		// 4. Prohibited Environment Access
+		try {
+			const env = Deno.env.get("PATH");
+			results.env_access = env ? "BREACH" : "BLOCKED";
+		} catch (e) {
+			results.env_access = "BLOCKED";
+		}
+
+		// 5. Prohibited Subprocess Execution
+		try {
+			if (typeof Deno.Command !== "undefined") {
+				new Deno.Command("echo").outputSync();
+				results.subprocess = "BREACH";
+			} else if (typeof Deno.run !== "undefined") {
+				Deno.run({ cmd: ["echo"] });
+				results.subprocess = "BREACH";
+			} else {
+				results.subprocess = "BLOCKED";
+			}
+		} catch (e) {
+			results.subprocess = "BLOCKED";
+		}
+
+		console.log(JSON.stringify(results));
+	`, forbiddenReadTarget, forbiddenWriteTarget)
+
 	if _, err := tmpScript.WriteString(scriptContent); err != nil {
 		t.Fatalf("failed to write temp script: %v", err)
 	}
 	_ = tmpScript.Close()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	args := BuildRuntimeArgs(RuntimeDeno, tmpScript.Name())
-	cmd := exec.Command(denoPath, args...)
+	cmd := exec.CommandContext(ctx, denoPath, args...)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Non-zero exit code on permission denial is expected behavior
-		t.Logf("Deno process exited with expected error: %v", err)
+	outStr := string(out)
+
+	if ctx.Err() != nil {
+		t.Fatalf("Deno sandbox test timed out (possible interactive prompt hang): %v", ctx.Err())
 	}
 
-	outStr := string(out)
-	if strings.Contains(outStr, "SECURITY_BREACH") {
-		t.Fatalf("Deno sandbox failed: prohibited access was permitted: %s", outStr)
+	if strings.Contains(outStr, "BREACH") {
+		t.Fatalf("Deno sandbox permission violation detected in output: %s", outStr)
 	}
-	if !strings.Contains(outStr, "DENO_SANDBOX_BLOCKED_FS") && !strings.Contains(outStr, "PermissionDenied") && !strings.Contains(outStr, "Requires read access") {
-		t.Logf("Deno output: %s", outStr)
+
+	if _, statErr := os.Stat(forbiddenWriteTarget); statErr == nil {
+		t.Fatalf("Deno sandbox failed: prohibited write target %s was created", forbiddenWriteTarget)
 	}
+
+	t.Logf("Deno behavioral isolation successfully verified (denials enforced): %s", strings.TrimSpace(outStr))
 }
 
 func TestSolver_StdoutOverflow_TerminatesProcess(t *testing.T) {
@@ -548,5 +660,76 @@ func TestSolver_NoSecretLeakage(t *testing.T) {
 	sigRes := res.Signatures["sig-1"]
 	if sigRes.Error != nil && strings.Contains(sigRes.Error.Error(), secretToken) {
 		t.Fatalf("signature result error leaked secret token: %s", sigRes.Error.Error())
+	}
+}
+
+func TestSolver_NodeBackend_ExplicitExecution(t *testing.T) {
+	_, err := exec.LookPath("node")
+	if err != nil {
+		if os.Getenv("GOYT_REQUIRE_NODE_RUNTIME") != "" {
+			t.Fatalf("expected Node.js in CI environment, but not found: %v", err)
+		}
+		t.Skip("skipping Node backend test: node not found on host")
+	}
+
+	nodeSolver, err := New(WithRuntime(RuntimeNode))
+	if err != nil {
+		t.Fatalf("failed to initialize Node solver: %v", err)
+	}
+
+	playerGB := loadFixture(t, "player_7460dd14_en_GB.js")
+	scriptGB := youtube.NewPlayerScript("https://www.youtube.com/s/player/7460dd14/base.js", "7460dd14_en_GB", playerGB)
+
+	batch := youtube.ChallengeBatch{
+		Signatures: []youtube.SignatureChallenge{
+			{ID: "sig-node", CipherString: "ABCD1234EFGH5678", TargetParam: "sig"},
+		},
+		NParams: []youtube.NChallenge{
+			{ID: "n-node", RawValue: "M4F03qQkE9n8wA"},
+		},
+	}
+
+	result, err := nodeSolver.SolveChallenges(context.Background(), scriptGB, batch)
+	if err != nil {
+		t.Fatalf("Node SolveChallenges error: %v", err)
+	}
+
+	wantSig := "65HGFE4"
+	wantN := "7vBb38VB1P"
+
+	if res, ok := result.Signatures["sig-node"]; !ok || res.Error != nil || res.Deciphered != wantSig {
+		t.Errorf("Node backend sig got %q (err=%v), want %q", res.Deciphered, res.Error, wantSig)
+	}
+	if res, ok := result.NParams["n-node"]; !ok || res.Error != nil || res.Transformed != wantN {
+		t.Errorf("Node backend n got %q (err=%v), want %q", res.Transformed, res.Error, wantN)
+	}
+}
+
+func TestSolverBundle_EmbeddedDigestVerification(t *testing.T) {
+	const expectedSHA256 = "1d145209fe63050bef8fddffb518ab4c4bcb79b737d184d1e1982a2ae2925dd3"
+
+	// 1. Embedded bundle content must match the immutable pinned digest (integrity verification)
+	h := sha256.Sum256([]byte(solverBundleJS))
+	actualSHA256 := hex.EncodeToString(h[:])
+
+	if actualSHA256 != expectedSHA256 {
+		t.Fatalf("embedded solver bundle SHA-256 mismatch:\n  got:  %s\n  want: %s", actualSHA256, expectedSHA256)
+	}
+
+	// 2. Bundle written to filesystem on demand matches embedded bundle
+	bundlePath, err := EnsureBundleScript()
+	if err != nil {
+		t.Fatalf("EnsureBundleScript error: %v", err)
+	}
+
+	fileData, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatalf("failed to read written bundle file: %v", err)
+	}
+
+	fileHash := sha256.Sum256(fileData)
+	actualFileSHA := hex.EncodeToString(fileHash[:])
+	if actualFileSHA != expectedSHA256 {
+		t.Fatalf("written bundle file SHA-256 mismatch:\n  got:  %s\n  want: %s", actualFileSHA, expectedSHA256)
 	}
 }

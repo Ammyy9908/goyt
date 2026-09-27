@@ -34,7 +34,12 @@ jobs:
       - name: Set up Node.js for JavaScript challenge solver
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.18.0'
+
+      - name: Set up Deno for JavaScript challenge solver
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: 'v2.0.6'
 
       - name: Install FFmpeg and verify required media encoders
         shell: bash
@@ -71,15 +76,23 @@ jobs:
       - name: Static analysis
         run: go vet ./...
 
+      - name: Solver bundle reproducibility check
+        shell: bash
+        run: ./scripts/generate_bundle.sh --check
+
       - name: Unit tests with race detector
         env:
           GOYT_REQUIRE_JS_RUNTIME: "true"
+          GOYT_REQUIRE_DENO_RUNTIME: "true"
+          GOYT_REQUIRE_NODE_RUNTIME: "true"
         run: go test -race -count=1 -timeout=5m ./...
 
       - name: Local integration tests
         env:
           GOYT_REQUIRE_ALL_ENCODERS: "true"
           GOYT_REQUIRE_JS_RUNTIME: "true"
+          GOYT_REQUIRE_DENO_RUNTIME: "true"
+          GOYT_REQUIRE_NODE_RUNTIME: "true"
         run: |
           go test -race -tags=integration -count=1 -timeout=5m -v ./...
 

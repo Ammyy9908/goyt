@@ -48,6 +48,16 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Set up Node.js for JavaScript challenge solver
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.18.0'
+
+      - name: Set up Deno for JavaScript challenge solver
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: 'v2.0.6'
+
       - name: Confirm release exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -78,12 +88,13 @@ jobs:
       - name: Validate tagged source
         env:
           GOYT_REQUIRE_ALL_ENCODERS: "true"
+          GOYT_REQUIRE_JS_RUNTIME: "true"
+          GOYT_REQUIRE_DENO_RUNTIME: "true"
+          GOYT_REQUIRE_NODE_RUNTIME: "true"
         run: |
           go vet ./...
           go test -race -count=1 -timeout=5m ./...
-          go test -race -tags=integration \
-            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestVideoExecutorIntegration_AllCombinations|TestHLSVideoIntegration_MKV|TestDecodeFailurePreservesExistingDestination|TestJobIntegration|TestHLSJobIntegration)$' \
-            -count=1 -timeout=5m -v ./...
+          go test -race -tags=integration -count=1 -timeout=5m -v ./...
 
       - name: Verify embedded version
         shell: bash
@@ -129,7 +140,7 @@ jobs:
               -o "$package_dir/goyt${extension}" \
               ./cmd/goyt
 
-            cp README.md LICENSE "$package_dir/"
+            cp README.md LICENSE THIRD_PARTY_NOTICES.md "$package_dir/"
 
             if [[ "$target_os" == "windows" ]]; then
               (

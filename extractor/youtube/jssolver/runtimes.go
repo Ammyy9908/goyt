@@ -18,14 +18,17 @@ const (
 	RuntimeQJS  = "qjs"
 )
 
-var autoCandidates = []string{RuntimeNode, RuntimeDeno, RuntimeBun, RuntimeQJS}
+var autoCandidates = []string{RuntimeDeno, RuntimeNode, RuntimeBun, RuntimeQJS}
 
 // ErrNoRuntimeFound is returned when no supported JavaScript runtime is discovered.
 var ErrNoRuntimeFound = errors.New("jssolver: no supported JavaScript runtime found; install node, deno, bun, or qjs, or specify a runtime via -js-runtime")
 
 // ResolveRuntime inspects PATH or an explicit file path to find and validate a JS runtime.
-// If an explicit file path is provided, the runtime kind is determined by inspecting the executable's
-// basename for "deno", "bun", "qjs", or "quickjs", and defaults to "node" (standard Node.js CLI interface).
+//
+// Explicit paths can specify the runtime type using a prefix (e.g. "deno:/usr/local/bin/my-deno",
+// "node:/opt/node/bin/node", "bun:/custom/bun", "qjs:/usr/bin/qjs"), or by having a recognizable
+// executable basename containing "deno", "bun", "qjs"/"quickjs", or "node"/"nodejs".
+// Custom paths with unrecognized runtime types are rejected with an explicit error.
 func ResolveRuntime(nameOrPath string) (string, string, error) {
 	nameOrPath = strings.TrimSpace(nameOrPath)
 	if nameOrPath == "" || nameOrPath == RuntimeAuto {
@@ -41,10 +44,54 @@ func ResolveRuntime(nameOrPath string) (string, string, error) {
 		return "", "", ErrNoRuntimeFound
 	}
 
-	// Check if nameOrPath is a standard name
+	// Check for explicit type prefix: "type:path" (e.g. "deno:/custom/path/bin")
+	if idx := strings.Index(nameOrPath, ":"); idx > 0 && idx < len(nameOrPath)-1 {
+		prefix := strings.ToLower(nameOrPath[:idx])
+		rawPath := nameOrPath[idx+1:]
+		var explicitKind string
+		switch prefix {
+		case RuntimeNode, "nodejs":
+			explicitKind = RuntimeNode
+		case RuntimeDeno:
+			explicitKind = RuntimeDeno
+		case RuntimeBun:
+			explicitKind = RuntimeBun
+		case RuntimeQJS, "quickjs":
+			explicitKind = RuntimeQJS
+		}
+		if explicitKind != "" {
+			info, err := os.Stat(rawPath)
+			if err != nil {
+				return "", "", fmt.Errorf("jssolver: runtime executable not found at %q: %w", rawPath, err)
+			}
+			if info.IsDir() {
+				return "", "", fmt.Errorf("jssolver: runtime path %q is a directory, expected executable file", rawPath)
+			}
+			abs, err := filepath.Abs(rawPath)
+			if err != nil {
+				abs = rawPath
+			}
+			return abs, explicitKind, nil
+		}
+	}
+
+	// Check if nameOrPath is a standard runtime name in PATH
 	lower := strings.ToLower(nameOrPath)
 	switch lower {
-	case RuntimeNode, RuntimeDeno, RuntimeBun, RuntimeQJS:
+	case RuntimeNode, "nodejs":
+		path, err := exec.LookPath("node")
+		if err != nil {
+			path, err = exec.LookPath("nodejs")
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("jssolver: runtime %q not found in PATH: %w", lower, err)
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+		return abs, RuntimeNode, nil
+	case RuntimeDeno, RuntimeBun:
 		path, err := exec.LookPath(lower)
 		if err != nil {
 			return "", "", fmt.Errorf("jssolver: runtime %q not found in PATH: %w", lower, err)
@@ -54,6 +101,19 @@ func ResolveRuntime(nameOrPath string) (string, string, error) {
 			abs = path
 		}
 		return abs, lower, nil
+	case RuntimeQJS, "quickjs":
+		path, err := exec.LookPath("qjs")
+		if err != nil {
+			path, err = exec.LookPath("quickjs")
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("jssolver: runtime %q not found in PATH: %w", lower, err)
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+		return abs, RuntimeQJS, nil
 	}
 
 	// Custom executable path
@@ -71,17 +131,18 @@ func ResolveRuntime(nameOrPath string) (string, string, error) {
 	}
 
 	base := strings.ToLower(filepath.Base(nameOrPath))
-	kind := RuntimeNode
 	switch {
 	case strings.Contains(base, "deno"):
-		kind = RuntimeDeno
+		return abs, RuntimeDeno, nil
 	case strings.Contains(base, "bun"):
-		kind = RuntimeBun
+		return abs, RuntimeBun, nil
 	case strings.Contains(base, "qjs") || strings.Contains(base, "quickjs"):
-		kind = RuntimeQJS
+		return abs, RuntimeQJS, nil
+	case strings.Contains(base, "node"):
+		return abs, RuntimeNode, nil
+	default:
+		return "", "", fmt.Errorf("jssolver: cannot determine JavaScript runtime type for %q; executable basename must contain node, deno, bun, or qjs, or specify runtime type with prefix (e.g. deno:%s)", nameOrPath, nameOrPath)
 	}
-
-	return abs, kind, nil
 }
 
 // BuildRuntimeArgs constructs the execution arguments for the given runtime kind and script path.

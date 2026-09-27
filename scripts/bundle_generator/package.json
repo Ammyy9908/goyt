@@ -1,0 +1,13 @@
+{
+  "name": "goyt-solver-bundle-generator",
+  "version": "0.8.0",
+  "private": true,
+  "description": "Deterministic AST challenge solver bundle generator for goyt",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "astring": "1.9.0",
+    "meriyah": "6.1.4"
+  }
+}
