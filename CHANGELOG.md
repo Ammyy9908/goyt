@@ -4,7 +4,16 @@
 
 ### Added
 
-- Persistent HTTP download jobs in `goyt download` for video and audio-only downloads via `-job-dir DIR` (fails if directory exists; requires HTTP transport).
+- Persistent download jobs in `goyt download` extended to supported YouTube HLS downloads for video and audio-only modes (`-transport hls -job-dir DIR`).
+- Backward-compatible schema extension to version-1 job manifests storing HLS variant identities, audio renditions, track roles, target durations, media sequence numbers, and ordered segment states with SHA-256 URL fingerprints, local paths, sizes, and file hashes.
+- Non-secret segment URL fingerprinting (`sha256(resolvedURL)`) proving exact URL identity against saved checkpointed playlists without persisting signed URLs, request headers, cookies, or tokens.
+- Conservative HLS segment reuse requiring matching pinned variant/audio rendition identities, matching ordered playlist structure, matching segment URL fingerprints, and passing local size/SHA-256 verification.
+- Presentation restart in an isolated new generation (`gen-1` -> `gen-2`) upon refreshed signed URL or playlist changes, preventing mixing of segment generations and reporting restart reasons to standard error.
+- Offline local processing and verification for completed HLS inputs: when all segments across all tracks are verified, local `.m3u8` playlists are generated from metadata and processed without network extraction.
+- Atomic segment completion checkpointing with bounded manifest updates and deterministic job-owned paths separated by generation and track.
+- Intermediate cleanup of `hls/` segment directories upon successful destination commit.
+- Integration tests with real FFmpeg/ffprobe covering interrupted combined MPEG-TS HLS jobs, separate video plus packed AAC audio HLS jobs, audio-only HLS jobs, generation restarts on changed tokens, tampered segment detection, and offline execution.
+- Persistent HTTP download jobs in `goyt download` for video and audio-only downloads via `-job-dir DIR` (fails if directory exists).
 - Persistent job resumption in `goyt download` via `-resume-job DIR`, restoring source URL, selection, audio settings, decode check choices, and output paths from the job manifest.
 - Rejection of source, selection, audio, and output flag overrides on `-resume-job` (`-url`, `-out`, `-height`, `-transport`, `-decode-check`, `-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`, `-audio-language`) with clear errors.
 - Support for operational parameter overrides on `-resume-job` (`-timeout`, `-stall-timeout`, `-url-refreshes`), granting fresh overall deadlines and fresh URL refresh budgets per invocation.

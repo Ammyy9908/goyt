@@ -1554,22 +1554,6 @@ func TestDownloadCLI_JobDir_FlagsValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("job-dir rejects hls transport", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		err := Run(context.Background(), []string{
-			"download",
-			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
-			"-transport", "hls",
-			"-job-dir", filepath.Join(tempDir, "hls-job"),
-		}, &stdout, &stderr)
-		if err == nil {
-			t.Fatal("expected error when job-dir uses hls transport, got nil")
-		}
-		if !strings.Contains(err.Error(), "HTTP transport only") {
-			t.Fatalf("unexpected error message: %v", err)
-		}
-	})
-
 	t.Run("goyt hls rejects job-dir and resume-job", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		err := Run(context.Background(), []string{

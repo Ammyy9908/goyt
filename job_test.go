@@ -124,6 +124,224 @@ func TestJobManifestValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("valid HLS video job manifest (2 tracks)", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-hls-video-2tracks")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		resolved := &ResolvedHLS{
+			Video: &HLSTrack{
+				Playlist: &HLSPlaylist{
+					Segments: []HLSSegment{
+						{URL: "https://example.test/v-seg0.ts", Duration: 2 * time.Second},
+						{URL: "https://example.test/v-seg1.ts", Duration: 2 * time.Second},
+					},
+					Duration: 4 * time.Second,
+				},
+			},
+			Audio: &HLSTrack{
+				Playlist: &HLSPlaylist{
+					Segments: []HLSSegment{
+						{URL: "https://example.test/a-seg0.aac", Duration: 2 * time.Second},
+						{URL: "https://example.test/a-seg1.aac", Duration: 2 * time.Second},
+					},
+					Duration: 4 * time.Second,
+				},
+			},
+			SelectedVariant: &HLSVariant{
+				Width:     1920,
+				Height:    1080,
+				Bandwidth: 5000000,
+				Codecs:    "avc1.640028,mp4a.40.2",
+			},
+			SelectedAudio: &HLSAudioRendition{
+				GroupID:  "audio",
+				Name:     "English",
+				Language: "en",
+			},
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"HLS Video",
+			destPath,
+			resolved,
+			Selection{MaxHeight: 1080},
+			true,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating HLS video job: %v", err)
+		}
+
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+
+		if loaded.Transport != "hls" || loaded.Mode != "video" {
+			t.Fatalf("unexpected transport/mode: %s / %s", loaded.Transport, loaded.Mode)
+		}
+		if loaded.HLS == nil || len(loaded.HLS.Tracks) != 2 {
+			t.Fatalf("expected 2 HLS tracks, got: %+v", loaded.HLS)
+		}
+		if loaded.HLS.Tracks[0].Role != "video" || loaded.HLS.Tracks[1].Role != "audio" {
+			t.Fatalf("unexpected track roles: %s, %s", loaded.HLS.Tracks[0].Role, loaded.HLS.Tracks[1].Role)
+		}
+		if len(loaded.HLS.Tracks[0].Segments) != 2 {
+			t.Fatalf("expected 2 video segments, got %d", len(loaded.HLS.Tracks[0].Segments))
+		}
+	})
+
+	t.Run("valid HLS audio-only job manifest", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-hls-audio")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		track := &HLSTrack{
+			Playlist: &HLSPlaylist{
+				Segments: []HLSSegment{
+					{URL: "https://example.test/a-seg0.aac", Duration: 3 * time.Second},
+				},
+				Duration: 3 * time.Second,
+			},
+		}
+
+		manifest, err := CreateHLSAudioJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"HLS Audio",
+			filepath.Join(tempDir, "song.mp3"),
+			track,
+			&HLSAudioRendition{GroupID: "audio", Name: "English", Language: "en"},
+			true,
+			"",
+			AudioOutputSpec{
+				RequestedFormat: "mp3",
+				ResolvedCodec:   "mp3",
+				Container:       "mp3",
+				Extension:       ".mp3",
+				Encoder:         "libmp3lame",
+				Quality:         2,
+			},
+			AudioSelection{AudioFormat: "mp3"},
+			true,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating HLS audio job: %v", err)
+		}
+
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+
+		if loaded.Transport != "hls" || loaded.Mode != "audio-only" {
+			t.Fatalf("unexpected transport/mode: %s / %s", loaded.Transport, loaded.Mode)
+		}
+		if loaded.HLS == nil || len(loaded.HLS.Tracks) != 1 || loaded.HLS.Tracks[0].Role != "audio" {
+			t.Fatalf("expected 1 audio track, got: %+v", loaded.HLS)
+		}
+	})
+
+	t.Run("HLS audio-only rejects video track", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-hls-audio-reject-video")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		data := `{
+			"schema_version": 1,
+			"job_id": "test-hls-invalid",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + filepath.Join(tempDir, "audio.mp3") + `",
+			"transport": "hls",
+			"mode": "audio-only",
+			"stage": "planned",
+			"hls": {
+				"generation": 1,
+				"tracks": [
+					{
+						"index": 0,
+						"role": "video",
+						"generation": 1,
+						"target_duration": 2,
+						"duration_seconds": 2.0,
+						"segments": [
+							{"index": 0, "duration_seconds": 2.0, "url_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "relative_path": "hls/gen-1/track-0/segment-00000.ts"}
+						]
+					}
+				]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatal("expected error for audio-only mode with video track, got nil")
+		}
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("expected ErrInvalidManifest, got: %v", err)
+		}
+	})
+
+	t.Run("HLS rejects path traversal in segment path", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-hls-traversal")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		data := `{
+			"schema_version": 1,
+			"job_id": "test-hls-traversal",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + destPath + `",
+			"transport": "hls",
+			"mode": "video",
+			"stage": "planned",
+			"hls": {
+				"generation": 1,
+				"tracks": [
+					{
+						"index": 0,
+						"role": "video",
+						"generation": 1,
+						"target_duration": 2,
+						"duration_seconds": 2.0,
+						"segments": [
+							{"index": 0, "duration_seconds": 2.0, "url_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "relative_path": "../../etc/passwd"}
+						]
+					}
+				]
+			}
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatal("expected error for segment path traversal, got nil")
+		}
+		if !errors.Is(err, ErrInvalidJobPath) {
+			t.Fatalf("expected ErrInvalidJobPath, got: %v", err)
+		}
+	})
+
 	t.Run("unsupported manifest version", func(t *testing.T) {
 		jobDir := filepath.Join(tempDir, "job-unsupported-version")
 		if err := os.MkdirAll(jobDir, 0700); err != nil {

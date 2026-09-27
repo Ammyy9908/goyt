@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,9 +16,13 @@ import (
 // StreamExtractor extracts media metadata for a given URL.
 type StreamExtractor func(ctx context.Context, u *url.URL) (*Media, error)
 
+// HLSExtractor extracts HLS manifest resource and media metadata for a given URL.
+type HLSExtractor func(ctx context.Context, u *url.URL) (Resource, *Media, error)
+
 // JobRunnerOptions contains operational dependencies and settings for executing a job.
 type JobRunnerOptions struct {
 	Extractor    StreamExtractor
+	HLSExtractor HLSExtractor
 	Downloader   *Downloader
 	Processor    *FFmpeg
 	Verifier     *Verifier
@@ -72,6 +77,13 @@ func ExecuteJob(ctx context.Context, jobDir string, opts JobRunnerOptions) error
 		}
 	}
 
+	if manifest.Transport == "hls" {
+		return executeHLSJob(ctx, jobDir, manifest, opts)
+	}
+	return executeHTTPJob(ctx, jobDir, manifest, opts)
+}
+
+func executeHTTPJob(ctx context.Context, jobDir string, manifest *JobManifest, opts JobRunnerOptions) error {
 	// 2. Validate integrity of existing completed input streams.
 	needExtraction := false
 	for i := range manifest.Streams {
@@ -367,6 +379,476 @@ func ExecuteJob(ctx context.Context, jobDir string, opts JobRunnerOptions) error
 		}
 	}
 
+	return verifyAndCommitJob(ctx, jobDir, manifest, stagedPath, opts)
+}
+
+func executeHLSJob(ctx context.Context, jobDir string, manifest *JobManifest, opts JobRunnerOptions) error {
+	if manifest.HLS == nil || len(manifest.HLS.Tracks) == 0 {
+		return fmt.Errorf("%w: missing HLS state", ErrInvalidManifest)
+	}
+
+	// 1. Validate integrity of all completed segments across all tracks.
+	needDownload := false
+	totalSegments := 0
+	reusedSegments := 0
+
+	for i := range manifest.HLS.Tracks {
+		track := &manifest.HLS.Tracks[i]
+		totalSegments += len(track.Segments)
+		for j := range track.Segments {
+			seg := &track.Segments[j]
+			if seg.Completed {
+				absPath := filepath.Join(jobDir, seg.RelativePath)
+				hash, size, err := ComputeFileSHA256(absPath)
+				if err == nil && size == seg.SizeBytes && strings.EqualFold(hash, seg.SHA256) {
+					reusedSegments++
+				} else {
+					seg.Completed = false
+					seg.SizeBytes = 0
+					seg.SHA256 = ""
+					needDownload = true
+				}
+			} else {
+				needDownload = true
+			}
+		}
+	}
+
+	// 2. If all segments are already completed and verified locally:
+	// We can proceed directly to local processing without any network extraction!
+	if !needDownload && reusedSegments == totalSegments && totalSegments > 0 {
+		fmt.Fprintf(opts.Stdout, "Reusing all %d verified segments locally.\n", totalSegments)
+		return processHLSOutput(ctx, jobDir, manifest, opts)
+	}
+
+	// 3. Incomplete job needs fresh HLS manifest extraction.
+	if opts.HLSExtractor == nil {
+		return errors.New("goyt: HLS extractor is required to resume incomplete HLS job")
+	}
+
+	u, err := url.Parse(manifest.SourceURL)
+	if err != nil {
+		return fmt.Errorf("invalid source URL %q: %w", manifest.SourceURL, err)
+	}
+
+	fmt.Fprintln(opts.Stdout, "Extracting fresh HLS playback URLs for incomplete job...")
+	manifestRes, media, err := opts.HLSExtractor(ctx, u)
+	if err != nil {
+		return err
+	}
+	if media.ID != manifest.VideoID {
+		return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", media.ID, manifest.VideoID)
+	}
+
+	hlsDownloader, err := NewHLSDownloader(opts.Downloader.client, opts.Processor)
+	if err != nil {
+		return err
+	}
+
+	// Resolve refreshed presentation
+	resolvedTracks, restartReason, err := resolveRefreshedHLSTracks(ctx, hlsDownloader, manifest, manifestRes)
+	if err != nil {
+		return err
+	}
+
+	// 4. Compare playlist structure & URL fingerprints for conservative reuse
+	restartGeneration := false
+	if restartReason != "" {
+		restartGeneration = true
+	} else {
+		if len(resolvedTracks) != len(manifest.HLS.Tracks) {
+			restartGeneration = true
+			restartReason = "track count changed"
+		} else {
+			for i := range manifest.HLS.Tracks {
+				savedTrack := &manifest.HLS.Tracks[i]
+				freshTrack := resolvedTracks[i]
+				if len(freshTrack.Playlist.Segments) != len(savedTrack.Segments) {
+					restartGeneration = true
+					restartReason = fmt.Sprintf("track %d segment count changed (%d -> %d)", i, len(savedTrack.Segments), len(freshTrack.Playlist.Segments))
+					break
+				}
+				for j := range savedTrack.Segments {
+					savedSeg := savedTrack.Segments[j]
+					freshSeg := freshTrack.Playlist.Segments[j]
+					if math.Abs(savedSeg.DurationSeconds-freshSeg.Duration.Seconds()) > 0.0001 {
+						restartGeneration = true
+						restartReason = fmt.Sprintf("track %d segment %d duration changed", i, j)
+						break
+					}
+					freshFingerprint := ComputeURLFingerprint(freshSeg.URL)
+					if freshFingerprint != savedSeg.URLFingerprint {
+						restartGeneration = true
+						restartReason = "segment URLs or tokens changed"
+						break
+					}
+				}
+				if restartGeneration {
+					break
+				}
+			}
+		}
+	}
+
+	if restartGeneration {
+		newGen := manifest.HLS.Generation + 1
+		fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): %s. Restarting download.\n", newGen, restartReason)
+		manifest.HLS.Generation = newGen
+		rebuildHLSTracks(manifest.HLS, resolvedTracks, newGen)
+		if err := manifest.Save(jobDir); err != nil {
+			return err
+		}
+		reusedSegments = 0
+	} else {
+		if reusedSegments > 0 {
+			fmt.Fprintf(opts.Stdout, "Reusing %d completed segments; %d remaining to download.\n", reusedSegments, totalSegments-reusedSegments)
+		}
+	}
+
+	// 5. Download missing segments with checkpointing & URL refresh handling
+	if manifest.Stage == JobStagePlanned {
+		manifest.Stage = JobStageDownloading
+		if err := manifest.Save(jobDir); err != nil {
+			return err
+		}
+	}
+
+	refreshBudget := opts.URLRefreshes
+	maxRefreshes := opts.URLRefreshes
+
+downloadLoop:
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		totSegs := 0
+		compSegs := 0
+		for i := range manifest.HLS.Tracks {
+			totSegs += len(manifest.HLS.Tracks[i].Segments)
+			for j := range manifest.HLS.Tracks[i].Segments {
+				if manifest.HLS.Tracks[i].Segments[j].Completed {
+					compSegs++
+				}
+			}
+		}
+
+		for i := range manifest.HLS.Tracks {
+			trackState := &manifest.HLS.Tracks[i]
+			freshTrack := resolvedTracks[i]
+			trackDir := filepath.Join(jobDir, "hls", fmt.Sprintf("gen-%d", manifest.HLS.Generation), fmt.Sprintf("track-%d", i))
+			if err := os.MkdirAll(trackDir, 0700); err != nil {
+				return err
+			}
+
+			for j := range trackState.Segments {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
+				segState := &trackState.Segments[j]
+				if segState.Completed {
+					continue
+				}
+
+				freshSeg := freshTrack.Playlist.Segments[j]
+				downloadPath := filepath.Join(trackDir, fmt.Sprintf("segment-%05d.download", j))
+				_ = os.Remove(downloadPath)
+
+				headers := freshTrack.Headers.Clone()
+				segmentURL, parseErr := url.Parse(freshSeg.URL)
+				if parseErr != nil || !validHLSURL(segmentURL) {
+					return fmt.Errorf("goyt: segment %d has an invalid URL", j+1)
+				}
+				if origin(freshTrack.BaseURL) != origin(segmentURL) {
+					headers = nil
+				}
+
+				_, dlErr := opts.Downloader.Download(
+					ctx,
+					Resource{URL: freshSeg.URL, Headers: headers},
+					downloadPath,
+					DownloadOptions{
+						Resume:       false,
+						MaxRetries:   opts.Options.MaxRetries,
+						RetryDelay:   opts.Options.RetryDelay,
+						StallTimeout: opts.Options.StallTimeout,
+					},
+				)
+
+				if dlErr != nil {
+					if ctx.Err() != nil || errors.Is(dlErr, context.Canceled) || errors.Is(dlErr, context.DeadlineExceeded) {
+						return dlErr
+					}
+
+					if IsRefreshTrigger(dlErr) && refreshBudget > 0 {
+						refreshBudget--
+						refreshCount := maxRefreshes - refreshBudget
+						fmt.Fprintf(opts.Stderr, "Refreshing playback URLs after media access failure (%d/%d).\n", refreshCount, maxRefreshes)
+						fmt.Fprintln(opts.Stderr, "Restarting the affected transfer.")
+
+						u, _ := url.Parse(manifest.SourceURL)
+						newManifestRes, newMedia, extErr := opts.HLSExtractor(ctx, u)
+						if extErr != nil {
+							return extErr
+						}
+						if newMedia.ID != manifest.VideoID {
+							return fmt.Errorf("goyt: refreshed video ID %q does not match original %q", newMedia.ID, manifest.VideoID)
+						}
+
+						newResolvedTracks, _, resErr := resolveRefreshedHLSTracks(ctx, hlsDownloader, manifest, newManifestRes)
+						if resErr != nil {
+							return resErr
+						}
+
+						newGen := manifest.HLS.Generation + 1
+						fmt.Fprintf(opts.Stderr, "HLS presentation restart (generation %d): URL refresh. Restarting download.\n", newGen)
+						manifest.HLS.Generation = newGen
+						rebuildHLSTracks(manifest.HLS, newResolvedTracks, newGen)
+						if err := manifest.Save(jobDir); err != nil {
+							return err
+						}
+						resolvedTracks = newResolvedTracks
+						continue downloadLoop
+					}
+
+					return fmt.Errorf("segment %d: %w", j+1, dlErr)
+				}
+
+				// Inspect framing
+				ext, inspErr := inspectHLSSegment(ctx, downloadPath)
+				if inspErr != nil {
+					_ = os.Remove(downloadPath)
+					return fmt.Errorf("segment %d: %w", j+1, inspErr)
+				}
+
+				localName := fmt.Sprintf("segment-%05d%s", j, ext)
+				localPath := filepath.Join(trackDir, localName)
+				relPath := filepath.Join("hls", fmt.Sprintf("gen-%d", manifest.HLS.Generation), fmt.Sprintf("track-%d", i), localName)
+
+				if err := os.Rename(downloadPath, localPath); err != nil {
+					return err
+				}
+
+				hash, size, hErr := ComputeFileSHA256(localPath)
+				if hErr != nil {
+					return fmt.Errorf("compute segment SHA256: %w", hErr)
+				}
+
+				segState.Completed = true
+				segState.RelativePath = relPath
+				segState.SizeBytes = size
+				segState.SHA256 = hash
+
+				if err := manifest.Save(jobDir); err != nil {
+					return err
+				}
+
+				compSegs++
+				fmt.Fprintf(opts.Stderr, "\rTrack %d: segment %d/%d (total %d/%d)", i+1, j+1, len(trackState.Segments), compSegs, totSegs)
+			}
+		}
+		fmt.Fprintln(opts.Stderr)
+		break downloadLoop
+	}
+
+	return processHLSOutput(ctx, jobDir, manifest, opts)
+}
+
+func resolveRefreshedHLSTracks(
+	ctx context.Context,
+	hlsDownloader *HLSDownloader,
+	manifest *JobManifest,
+	manifestRes Resource,
+) ([]*HLSTrack, string, error) {
+	if manifest.Mode == "audio-only" {
+		if manifest.HLS.SelectedAudio != nil {
+			origAudio := IdentityToAudio(*manifest.HLS.SelectedAudio)
+			track, newAudio, err := hlsDownloader.ResolveRefreshedAudioOnlyMaster(ctx, manifestRes, origAudio)
+			if err != nil {
+				return nil, "", fmt.Errorf("%w: %v", ErrSelectionUnavailable, err)
+			}
+			manifest.HLS.SelectedAudio = &HLSAudioIdentity{
+				GroupID:    newAudio.GroupID,
+				Name:       newAudio.Name,
+				Language:   newAudio.Language,
+				Default:    newAudio.Default,
+				AutoSelect: newAudio.AutoSelect,
+			}
+			return []*HLSTrack{track}, "", nil
+		}
+		track, err := hlsDownloader.ResolveMediaPlaylist(ctx, manifestRes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []*HLSTrack{track}, "", nil
+	}
+
+	// Video mode
+	if manifest.HLS.SelectedVariant != nil {
+		origVariant := IdentityToVariant(*manifest.HLS.SelectedVariant)
+		var origAudio *HLSAudioRendition
+		if manifest.HLS.SelectedAudio != nil {
+			a := IdentityToAudio(*manifest.HLS.SelectedAudio)
+			origAudio = &a
+		}
+		resolved, err := hlsDownloader.ResolveRefreshedMaster(ctx, manifestRes, origVariant, origAudio)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: %v", ErrSelectionUnavailable, err)
+		}
+		if resolved.SelectedVariant != nil {
+			v := VariantToIdentity(*resolved.SelectedVariant)
+			manifest.HLS.SelectedVariant = &v
+		}
+		if resolved.SelectedAudio != nil {
+			a := AudioToIdentity(*resolved.SelectedAudio)
+			manifest.HLS.SelectedAudio = &a
+		}
+		tracks := []*HLSTrack{resolved.Video}
+		if resolved.Audio != nil {
+			tracks = append(tracks, resolved.Audio)
+		}
+		return tracks, "", nil
+	}
+
+	// Single media playlist
+	track, err := hlsDownloader.ResolveMediaPlaylist(ctx, manifestRes)
+	if err != nil {
+		return nil, "", err
+	}
+	return []*HLSTrack{track}, "", nil
+}
+
+func rebuildHLSTracks(hlsState *JobHLSState, resolvedTracks []*HLSTrack, gen int) {
+	tracks := make([]HLSTrackState, len(resolvedTracks))
+	for i, t := range resolvedTracks {
+		role := "video"
+		if len(resolvedTracks) == 1 && len(hlsState.Tracks) > 0 && hlsState.Tracks[0].Role == "combined" {
+			role = "combined"
+		} else if i == 1 || (len(resolvedTracks) == 1 && len(hlsState.Tracks) > 0 && hlsState.Tracks[0].Role == "audio") {
+			role = "audio"
+		}
+
+		var variantID *HLSVariantIdentity
+		if role == "video" || role == "combined" {
+			variantID = hlsState.SelectedVariant
+		}
+		var audioID *HLSAudioIdentity
+		if role == "audio" {
+			audioID = hlsState.SelectedAudio
+		}
+
+		segs := make([]HLSSegmentState, len(t.Playlist.Segments))
+		targetDuration := 1
+		for j, s := range t.Playlist.Segments {
+			segs[j] = HLSSegmentState{
+				Index:           j,
+				DurationSeconds: s.Duration.Seconds(),
+				URLFingerprint:  ComputeURLFingerprint(s.URL),
+				RelativePath:    filepath.Join("hls", fmt.Sprintf("gen-%d", gen), fmt.Sprintf("track-%d", i), fmt.Sprintf("segment-%05d", j)),
+				Completed:       false,
+			}
+			sec := int(math.Ceil(s.Duration.Seconds()))
+			if sec > targetDuration {
+				targetDuration = sec
+			}
+		}
+
+		tracks[i] = HLSTrackState{
+			Index:           i,
+			Role:            role,
+			Generation:      gen,
+			Variant:         variantID,
+			Audio:           audioID,
+			TargetDuration:  targetDuration,
+			DurationSeconds: t.Playlist.Duration.Seconds(),
+			Segments:        segs,
+		}
+	}
+	hlsState.Tracks = tracks
+}
+
+func processHLSOutput(ctx context.Context, jobDir string, manifest *JobManifest, opts JobRunnerOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	manifest.Stage = JobStageProcessing
+	if err := manifest.Save(jobDir); err != nil {
+		return err
+	}
+
+	gen := manifest.HLS.Generation
+	genDir := filepath.Join(jobDir, "hls", fmt.Sprintf("gen-%d", gen))
+
+	// Write local media playlists for each track
+	for i, track := range manifest.HLS.Tracks {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:%d\n#EXT-X-PLAYLIST-TYPE:VOD\n",
+			track.TargetDuration, track.MediaSequence)
+		for _, seg := range track.Segments {
+			relToGen := filepath.Join(fmt.Sprintf("track-%d", i), filepath.Base(seg.RelativePath))
+			fmt.Fprintf(&sb, "#EXTINF:%.9f,\n%s\n", seg.DurationSeconds, relToGen)
+		}
+		sb.WriteString("#EXT-X-ENDLIST\n")
+
+		trackM3U8 := filepath.Join(genDir, fmt.Sprintf("track-%d.m3u8", i))
+		if err := os.WriteFile(trackM3U8, []byte(sb.String()), 0600); err != nil {
+			return fmt.Errorf("write track playlist: %w", err)
+		}
+	}
+
+	var localInput string
+	if len(manifest.HLS.Tracks) == 2 {
+		localInput = filepath.Join(genDir, "master.m3u8")
+		master := "#EXTM3U\n" +
+			"#EXT-X-VERSION:3\n" +
+			"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\"," +
+			"NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES," +
+			"URI=\"track-1.m3u8\"\n" +
+			"#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"audio\"\n" +
+			"track-0.m3u8\n"
+		if err := os.WriteFile(localInput, []byte(master), 0600); err != nil {
+			return fmt.Errorf("write master playlist: %w", err)
+		}
+	} else {
+		localInput = filepath.Join(genDir, "track-0.m3u8")
+	}
+
+	var stagedPath string
+	if manifest.Mode == "audio-only" {
+		if opts.Processor == nil {
+			return errors.New("goyt: audio processing requires an FFmpeg processor")
+		}
+		spec := manifest.ToAudioOutputSpec()
+		stagedPath = filepath.Join(jobDir, "staged_output"+spec.Extension)
+		_ = os.Remove(stagedPath)
+
+		fmt.Fprintln(opts.Stdout, "Processing audio output...")
+		if err := opts.Processor.ConvertAudio(ctx, localInput, stagedPath, spec, true); err != nil {
+			return fmt.Errorf("audio processing failed: %w", err)
+		}
+	} else {
+		outExt := "." + normalizeContainer(manifest.OutputContainer)
+		stagedPath = filepath.Join(jobDir, "staged_output"+outExt)
+		_ = os.Remove(stagedPath)
+
+		fmt.Fprintln(opts.Stdout, "Processing HLS video output...")
+		var mapArgs []string
+		if len(manifest.HLS.Tracks) == 2 {
+			mapArgs = []string{"-map", "0:v:0", "-map", "0:a:0"}
+		} else {
+			mapArgs = []string{"-map", "0:v:0", "-map", "0:a:0?"}
+		}
+		if err := opts.Processor.process(ctx, "local-hls", []string{localInput}, mapArgs, stagedPath); err != nil {
+			return fmt.Errorf("video processing failed: %w", err)
+		}
+	}
+
+	return verifyAndCommitJob(ctx, jobDir, manifest, stagedPath, opts)
+}
+
+func verifyAndCommitJob(ctx context.Context, jobDir string, manifest *JobManifest, stagedPath string, opts JobRunnerOptions) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -501,18 +983,15 @@ func verifyCompletedDestination(m *JobManifest, stdout io.Writer) error {
 }
 
 func commitStagedFile(stagedPath, destPath string) error {
-	// If stagedPath is identical to destPath (unlikely, but safe guard)
 	if stagedPath == destPath {
 		return nil
 	}
 
-	// Try atomic rename first
 	err := os.Rename(stagedPath, destPath)
 	if err == nil {
 		return nil
 	}
 
-	// If rename fails (e.g. across filesystems/mountpoints), stage safely on destination directory
 	destDir := filepath.Dir(destPath)
 	tmpFile, err := os.CreateTemp(destDir, ".goyt-dest-stage-*.tmp")
 	if err != nil {
@@ -546,7 +1025,6 @@ func commitStagedFile(stagedPath, destPath string) error {
 		return err
 	}
 
-	// Rename temp file in destination directory to destPath
 	if err := os.Rename(tmpPath, destPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
@@ -561,6 +1039,10 @@ func cleanupIntermediateFiles(jobDir string, m *JobManifest) {
 	inputsDir := filepath.Join(jobDir, "inputs")
 	_ = os.RemoveAll(inputsDir)
 
+	// Remove owned hls directory
+	hlsDir := filepath.Join(jobDir, "hls")
+	_ = os.RemoveAll(hlsDir)
+
 	// Remove staged output file if present
 	if m.PreCommit != nil && m.PreCommit.StagedRelativePath != "" {
 		stagedPath := filepath.Join(jobDir, m.PreCommit.StagedRelativePath)
@@ -569,4 +1051,12 @@ func cleanupIntermediateFiles(jobDir string, m *JobManifest) {
 	_ = os.Remove(filepath.Join(jobDir, "staged_output.mp4"))
 	_ = os.Remove(filepath.Join(jobDir, "staged_output.mkv"))
 	_ = os.Remove(filepath.Join(jobDir, "staged_output.webm"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.mp3"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.aac"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.m4a"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.flac"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.alac"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.opus"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.ogg"))
+	_ = os.Remove(filepath.Join(jobDir, "staged_output.wav"))
 }

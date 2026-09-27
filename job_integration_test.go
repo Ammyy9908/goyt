@@ -693,3 +693,750 @@ func TestJobIntegration(t *testing.T) {
 		}
 	})
 }
+
+func TestHLSJobIntegration(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Fatal("integration test requires ffmpeg")
+	}
+	ffprobePath, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Fatal("integration test requires ffprobe")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	runFFmpeg := func(args ...string) {
+		t.Helper()
+		cmdArgs := append([]string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y"}, args...)
+		output, err := exec.CommandContext(ctx, ffmpegPath, cmdArgs...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ffmpeg failed: %v\n%s", err, output)
+		}
+	}
+
+	sourceDir := t.TempDir()
+	tsVideo0 := filepath.Join(sourceDir, "video0.ts")
+	tsVideo1 := filepath.Join(sourceDir, "video1.ts")
+	tsMuxed0 := filepath.Join(sourceDir, "muxed0.ts")
+	tsMuxed1 := filepath.Join(sourceDir, "muxed1.ts")
+	rawAAC0 := filepath.Join(sourceDir, "raw0.aac")
+	rawAAC1 := filepath.Join(sourceDir, "raw1.aac")
+
+	// Generate 1s test media chunks
+	runFFmpeg("-f", "lavfi", "-i", "color=c=blue:s=160x120:r=25", "-t", "1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mpegts", tsVideo0)
+	runFFmpeg("-f", "lavfi", "-i", "color=c=red:s=160x120:r=25", "-t", "1", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mpegts", tsVideo1)
+
+	runFFmpeg("-f", "lavfi", "-i", "color=c=blue:s=160x120:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mpegts", tsMuxed0)
+	runFFmpeg("-f", "lavfi", "-i", "color=c=red:s=160x120:r=25", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mpegts", tsMuxed1)
+
+	runFFmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-vn", "-c:a", "aac", "-f", "adts", rawAAC0)
+	runFFmpeg("-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000", "-t", "1", "-vn", "-c:a", "aac", "-f", "adts", rawAAC1)
+
+	// Prefix AAC with ID3 timestamp
+	id3Payload := []byte("com.apple.streaming.transportStreamTimestamp\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+	id3Header := []byte{'I', 'D', '3', 4, 0, 0, 0, 0, byte(len(id3Payload) >> 7), byte(len(id3Payload) & 0x7f)}
+	tag := append(id3Header, id3Payload...)
+
+	rawAACData0, err := os.ReadFile(rawAAC0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aac0 := append(tag, rawAACData0...)
+
+	rawAACData1, err := os.ReadFile(rawAAC1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aac1 := append(tag, rawAACData1...)
+
+	videoData0, _ := os.ReadFile(tsVideo0)
+	videoData1, _ := os.ReadFile(tsVideo1)
+	muxedData0, _ := os.ReadFile(tsMuxed0)
+	muxedData1, _ := os.ReadFile(tsMuxed1)
+
+	processor, err := NewFFmpeg(ffmpegPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(ffprobePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("combined MPEG-TS HLS job resume with segment reuse", func(t *testing.T) {
+		var seg0Requests, seg1Requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts\n#EXTINF:1.0,\n/seg1.ts\n#EXT-X-ENDLIST\n")
+			case "/seg0.ts":
+				seg0Requests.Add(1)
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				seg1Requests.Add(1)
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-combined")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsvideotest",
+			"hlsvideotest",
+			"HLS Combined Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		// Download only segment 0 first and checkpoint it
+		track0Dir := filepath.Join(jobDir, "hls", "gen-1", "track-0")
+		_ = os.MkdirAll(track0Dir, 0700)
+		seg0Path := filepath.Join(track0Dir, "segment-00000.ts")
+		if err := os.WriteFile(seg0Path, muxedData0, 0600); err != nil {
+			t.Fatal(err)
+		}
+		hash0, size0, _ := ComputeFileSHA256(seg0Path)
+		manifest.HLS.Tracks[0].Segments[0].Completed = true
+		manifest.HLS.Tracks[0].Segments[0].RelativePath = filepath.Join("hls", "gen-1", "track-0", "segment-00000.ts")
+		manifest.HLS.Tracks[0].Segments[0].SizeBytes = size0
+		manifest.HLS.Tracks[0].Segments[0].SHA256 = hash0
+		manifest.Stage = JobStageDownloading
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		// Now execute the job to resume
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlsvideotest", Title: "HLS Combined Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing HLS job: %v", err)
+		}
+
+		// Verify segment 0 was NOT requested again (since it was already completed)
+		if seg0Requests.Load() != 0 {
+			t.Fatalf("expected 0 requests for completed segment 0, got %d", seg0Requests.Load())
+		}
+		// Segment 1 was downloaded
+		if seg1Requests.Load() != 1 {
+			t.Fatalf("expected 1 request for segment 1, got %d", seg1Requests.Load())
+		}
+
+		// Verify destination exists and is valid MP4
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+
+		// Verify job is marked completed and intermediates cleaned up
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Stage != JobStageCompleted {
+			t.Fatalf("expected JobStageCompleted, got %s", loaded.Stage)
+		}
+		if _, err := os.Stat(filepath.Join(jobDir, "hls")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("expected hls intermediate directory to be cleaned up")
+		}
+
+		// Test idempotent resume of completed job without network requests
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error resuming completed job: %v", err)
+		}
+		if seg1Requests.Load() != 1 {
+			t.Fatalf("expected still 1 request for segment 1 after completed resume, got %d", seg1Requests.Load())
+		}
+	})
+
+	t.Run("separate video plus packed AAC audio HLS job resume", func(t *testing.T) {
+		var v0Reqs, v1Reqs, a0Reqs, a1Reqs atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/master.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"/audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=160x120,AUDIO=\"audio\"\n/video.m3u8\n")
+			case "/video.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/v0.ts\n#EXTINF:1.0,\n/v1.ts\n#EXT-X-ENDLIST\n")
+			case "/audio.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/a0.aac\n#EXTINF:1.0,\n/a1.aac\n#EXT-X-ENDLIST\n")
+			case "/v0.ts":
+				v0Reqs.Add(1)
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(videoData0)
+			case "/v1.ts":
+				v1Reqs.Add(1)
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(videoData1)
+			case "/a0.aac":
+				a0Reqs.Add(1)
+				w.Header().Set("Content-Type", "audio/aac")
+				_, _ = w.Write(aac0)
+			case "/a1.aac":
+				a1Reqs.Add(1)
+				w.Header().Set("Content-Type", "audio/aac")
+				_, _ = w.Write(aac1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-separate")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylistLanguage(ctx, Resource{URL: server.URL + "/master.m3u8"}, 1080, "en")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsvideoseparate",
+			"hlsvideoseparate",
+			"HLS Separate Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080, AudioLanguage: "en"},
+			true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/master.m3u8"}, &Media{ID: "hlsvideoseparate", Title: "HLS Separate Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing separate HLS job: %v", err)
+		}
+
+		if v0Reqs.Load() != 1 || v1Reqs.Load() != 1 || a0Reqs.Load() != 1 || a1Reqs.Load() != 1 {
+			t.Fatalf("unexpected request counts: v0=%d, v1=%d, a0=%d, a1=%d", v0Reqs.Load(), v1Reqs.Load(), a0Reqs.Load(), a1Reqs.Load())
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("audio-only HLS job makes zero video requests", func(t *testing.T) {
+		var videoReqs, audioReqs atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/master.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"/audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.640028,mp4a.40.2\",RESOLUTION=160x120,AUDIO=\"audio\"\n/video.m3u8\n")
+			case "/video.m3u8", "/v0.ts", "/v1.ts":
+				videoReqs.Add(1)
+				http.NotFound(w, r)
+			case "/audio.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/a0.aac\n#EXTINF:1.0,\n/a1.aac\n#EXT-X-ENDLIST\n")
+			case "/a0.aac":
+				audioReqs.Add(1)
+				w.Header().Set("Content-Type", "audio/aac")
+				_, _ = w.Write(aac0)
+			case "/a1.aac":
+				audioReqs.Add(1)
+				w.Header().Set("Content-Type", "audio/aac")
+				_, _ = w.Write(aac1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-audio-only")
+		destFile := filepath.Join(t.TempDir(), "song.mp3")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		track, selectedAudio, isOrig, warn, err := hlsDownloader.ResolveAudioLanguage(ctx, Resource{URL: server.URL + "/master.m3u8"}, "en")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		spec := AudioOutputSpec{
+			RequestedFormat: "mp3",
+			ResolvedCodec:   "mp3",
+			Container:       "mp3",
+			Extension:       ".mp3",
+			Encoder:         "libmp3lame",
+			Quality:         2,
+		}
+
+		manifest, err := CreateHLSAudioJob(
+			"https://www.youtube.com/watch?v=hlsaudiotest",
+			"hlsaudiotest",
+			"HLS Audio Test",
+			destFile,
+			track,
+			selectedAudio,
+			isOrig,
+			warn,
+			spec,
+			AudioSelection{AudioLanguage: "en", AudioFormat: "mp3"},
+			true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/master.m3u8"}, &Media{ID: "hlsaudiotest", Title: "HLS Audio Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing audio-only HLS job: %v", err)
+		}
+
+		if videoReqs.Load() != 0 {
+			t.Fatalf("expected 0 video requests in audio-only mode, got %d", videoReqs.Load())
+		}
+		if audioReqs.Load() != 2 {
+			t.Fatalf("expected 2 audio segment requests, got %d", audioReqs.Load())
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination audio file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("changed signed URLs force isolated presentation restart in gen-2", func(t *testing.T) {
+		var token atomic.Value
+		token.Store("tok1")
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			curTok := token.Load().(string)
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts?token=%s\n#EXTINF:1.0,\n/seg1.ts?token=%s\n#EXT-X-ENDLIST\n", curTok, curTok)
+			case "/seg0.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-changed-tokens")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsrestarttest",
+			"hlsrestarttest",
+			"HLS Restart Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		// Save segment 0 as completed in gen-1
+		track0Dir := filepath.Join(jobDir, "hls", "gen-1", "track-0")
+		_ = os.MkdirAll(track0Dir, 0700)
+		seg0Path := filepath.Join(track0Dir, "segment-00000.ts")
+		_ = os.WriteFile(seg0Path, muxedData0, 0600)
+		hash0, size0, _ := ComputeFileSHA256(seg0Path)
+
+		manifest.HLS.Tracks[0].Segments[0].Completed = true
+		manifest.HLS.Tracks[0].Segments[0].RelativePath = filepath.Join("hls", "gen-1", "track-0", "segment-00000.ts")
+		manifest.HLS.Tracks[0].Segments[0].SizeBytes = size0
+		manifest.HLS.Tracks[0].Segments[0].SHA256 = hash0
+		manifest.Stage = JobStageDownloading
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		// Now change the token on the server so refreshed URLs have different tokens
+		token.Store("tok2")
+
+		var stderrBuf strings.Builder
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlsrestarttest", Title: "HLS Restart Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+			Stderr:       &stderrBuf,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing job: %v", err)
+		}
+
+		stderrStr := stderrBuf.String()
+		if !strings.Contains(stderrStr, "HLS presentation restart (generation 2)") {
+			t.Errorf("expected stderr to report generation 2 restart, got:\n%s", stderrStr)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("tampered segment detected and redownloaded", func(t *testing.T) {
+		var seg0Requests atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts\n#EXTINF:1.0,\n/seg1.ts\n#EXT-X-ENDLIST\n")
+			case "/seg0.ts":
+				seg0Requests.Add(1)
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-tampered")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlstamperedtest",
+			"hlstamperedtest",
+			"HLS Tampered Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		// Save segment 0 with valid metadata in manifest, but write corrupted data on disk
+		track0Dir := filepath.Join(jobDir, "hls", "gen-1", "track-0")
+		_ = os.MkdirAll(track0Dir, 0700)
+		seg0Path := filepath.Join(track0Dir, "segment-00000.ts")
+		_ = os.WriteFile(seg0Path, []byte("corrupted bytes here"), 0600)
+
+		manifest.HLS.Tracks[0].Segments[0].Completed = true
+		manifest.HLS.Tracks[0].Segments[0].RelativePath = filepath.Join("hls", "gen-1", "track-0", "segment-00000.ts")
+		manifest.HLS.Tracks[0].Segments[0].SizeBytes = int64(len(muxedData0))
+		manifest.HLS.Tracks[0].Segments[0].SHA256 = "0000000000000000000000000000000000000000000000000000000000000000"
+		manifest.Stage = JobStageDownloading
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlstamperedtest", Title: "HLS Tampered Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing job: %v", err)
+		}
+
+		// Verify segment 0 was re-requested from server
+		if seg0Requests.Load() != 1 {
+			t.Fatalf("expected 1 request for tampered segment 0, got %d", seg0Requests.Load())
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("URL refresh during segment failure uses shared budget", func(t *testing.T) {
+		var seg1Attempts atomic.Int32
+		var refreshCount atomic.Int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts?ref=%d\n#EXTINF:1.0,\n/seg1.ts?ref=%d\n#EXT-X-ENDLIST\n", refreshCount.Load(), refreshCount.Load())
+			case "/seg0.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				att := seg1Attempts.Add(1)
+				if att == 1 {
+					// Fail with 403 Forbidden to trigger URL refresh
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-refresh-budget")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlsrefreshtest",
+			"hlsrefreshtest",
+			"HLS Refresh Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		var stderrBuf strings.Builder
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				refreshCount.Add(1)
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlsrefreshtest", Title: "HLS Refresh Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+			URLRefreshes: 1,
+			Stderr:       &stderrBuf,
+		}
+
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing job with refresh: %v", err)
+		}
+
+		stderrStr := stderrBuf.String()
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure") {
+			t.Errorf("expected stderr to report URL refresh, got:\n%s", stderrStr)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("cancellation preserves recoverable state and allows resume", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/muxed.m3u8":
+				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+				fmt.Fprint(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.0,\n/seg0.ts\n#EXTINF:1.0,\n/seg1.ts\n#EXT-X-ENDLIST\n")
+			case "/seg0.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData0)
+			case "/seg1.ts":
+				w.Header().Set("Content-Type", "video/mp2t")
+				_, _ = w.Write(muxedData1)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-hls-cancel")
+		destFile := filepath.Join(t.TempDir(), "output.mp4")
+
+		hlsDownloader, _ := NewHLSDownloader(server.Client(), processor)
+		resolved, err := hlsDownloader.ResolvePlaylist(ctx, Resource{URL: server.URL + "/muxed.m3u8"}, 1080)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateHLSVideoJob(
+			"https://www.youtube.com/watch?v=hlscanceltest",
+			"hlscanceltest",
+			"HLS Cancel Test",
+			destFile,
+			resolved,
+			Selection{MaxHeight: 1080},
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		cancelCtx, cancelFunc := context.WithCancel(ctx)
+		cancelFunc() // cancel immediately
+
+		opts := JobRunnerOptions{
+			HLSExtractor: func(ctx context.Context, u *url.URL) (Resource, *Media, error) {
+				return Resource{URL: server.URL + "/muxed.m3u8"}, &Media{ID: "hlscanceltest", Title: "HLS Cancel Test"}, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+		}
+
+		err = ExecuteJob(cancelCtx, jobDir, opts)
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+
+		// State must remain intact and valid
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest after cancel: %v", err)
+		}
+		if loaded.JobID != manifest.JobID {
+			t.Fatalf("unexpected job ID: %s", loaded.JobID)
+		}
+
+		// Now resume with active context
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error resuming canceled job: %v", err)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+}

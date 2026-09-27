@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,60 @@ type JobStreamState struct {
 	Completed    bool           `json:"completed"`
 	SizeBytes    int64          `json:"size_bytes,omitempty"`
 	SHA256       string         `json:"sha256,omitempty"`
+}
+
+// HLSVariantIdentity captures the immutable identity of an HLS video variant.
+type HLSVariantIdentity struct {
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Bandwidth  int64  `json:"bandwidth,omitempty"`
+	Codecs     string `json:"codecs,omitempty"`
+	AudioGroup string `json:"audio_group,omitempty"`
+	FrameRate  string `json:"frame_rate,omitempty"`
+	VideoRange string `json:"video_range,omitempty"`
+}
+
+// HLSAudioIdentity captures the immutable identity of an HLS audio rendition.
+type HLSAudioIdentity struct {
+	GroupID    string `json:"group_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Language   string `json:"language,omitempty"`
+	Default    bool   `json:"default,omitempty"`
+	AutoSelect bool   `json:"auto_select,omitempty"`
+}
+
+// HLSSegmentState captures the snapshot and download status of an individual HLS segment.
+type HLSSegmentState struct {
+	Index           int     `json:"index"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	URLFingerprint  string  `json:"url_fingerprint"`
+	RelativePath    string  `json:"relative_path"`
+	Completed       bool    `json:"completed"`
+	SizeBytes       int64   `json:"size_bytes,omitempty"`
+	SHA256          string  `json:"sha256,omitempty"`
+}
+
+// HLSTrackState captures the snapshot and segments of a single HLS media track.
+type HLSTrackState struct {
+	Index           int                 `json:"index"`
+	Role            string              `json:"role"` // "video", "audio", or "combined"
+	Generation      int                 `json:"generation"`
+	Variant         *HLSVariantIdentity `json:"variant,omitempty"`
+	Audio           *HLSAudioIdentity   `json:"audio,omitempty"`
+	TargetDuration  int                 `json:"target_duration"`
+	MediaSequence   int64               `json:"media_sequence"`
+	DurationSeconds float64             `json:"duration_seconds"`
+	Segments        []HLSSegmentState   `json:"segments"`
+}
+
+// JobHLSState captures the overall HLS presentation state for a persistent HLS download job.
+type JobHLSState struct {
+	Generation      int                 `json:"generation"`
+	SelectedVariant *HLSVariantIdentity `json:"selected_variant,omitempty"`
+	SelectedAudio   *HLSAudioIdentity   `json:"selected_audio,omitempty"`
+	AudioIsOriginal bool                `json:"audio_is_original,omitempty"`
+	AudioWarning    string              `json:"audio_warning,omitempty"`
+	Tracks          []HLSTrackState     `json:"tracks"`
 }
 
 // JobSelection preserves the caller's selection constraints.
@@ -106,7 +161,8 @@ type JobManifest struct {
 	NeedsRemux      bool             `json:"needs_remux,omitempty"`
 	OutputContainer string           `json:"output_container,omitempty"`
 	DecodeCheck     bool             `json:"decode_check"`
-	Streams         []JobStreamState `json:"streams"`
+	Streams         []JobStreamState `json:"streams,omitempty"`
+	HLS             *JobHLSState     `json:"hls,omitempty"`
 	PreCommit       *JobPreCommit    `json:"pre_commit,omitempty"`
 	CompletedAt     *time.Time       `json:"completed_at,omitempty"`
 }
@@ -293,6 +349,299 @@ func CreateAudioJob(
 	}, nil
 }
 
+// ComputeURLFingerprint returns the SHA-256 hex digest of a URL.
+// It proves identity against an unchanged resolved URL without persisting secrets or tokens.
+func ComputeURLFingerprint(rawURL string) string {
+	h := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(h[:])
+}
+
+// VariantToIdentity extracts immutable identity fields from an HLSVariant.
+func VariantToIdentity(v HLSVariant) HLSVariantIdentity {
+	return HLSVariantIdentity{
+		Width:      v.Width,
+		Height:     v.Height,
+		Bandwidth:  v.Bandwidth,
+		Codecs:     v.Codecs,
+		AudioGroup: v.AudioGroup,
+		FrameRate:  v.FrameRate,
+		VideoRange: v.VideoRange,
+	}
+}
+
+// IdentityToVariant reconstructs an HLSVariant from HLSVariantIdentity.
+func IdentityToVariant(id HLSVariantIdentity) HLSVariant {
+	return HLSVariant{
+		Width:      id.Width,
+		Height:     id.Height,
+		Bandwidth:  id.Bandwidth,
+		Codecs:     id.Codecs,
+		AudioGroup: id.AudioGroup,
+		FrameRate:  id.FrameRate,
+		VideoRange: id.VideoRange,
+	}
+}
+
+// AudioToIdentity extracts immutable identity fields from an HLSAudioRendition.
+func AudioToIdentity(a HLSAudioRendition) HLSAudioIdentity {
+	return HLSAudioIdentity{
+		GroupID:    a.GroupID,
+		Name:       a.Name,
+		Language:   a.Language,
+		Default:    a.Default,
+		AutoSelect: a.AutoSelect,
+	}
+}
+
+// IdentityToAudio reconstructs an HLSAudioRendition from HLSAudioIdentity.
+func IdentityToAudio(id HLSAudioIdentity) HLSAudioRendition {
+	return HLSAudioRendition{
+		GroupID:    id.GroupID,
+		Name:       id.Name,
+		Language:   id.Language,
+		Default:    id.Default,
+		AutoSelect: id.AutoSelect,
+	}
+}
+
+// CreateHLSVideoJob creates an initialized JobManifest for an HLS video download.
+func CreateHLSVideoJob(
+	sourceURL string,
+	videoID string,
+	title string,
+	destination string,
+	resolved *ResolvedHLS,
+	selection Selection,
+	decodeCheck bool,
+) (*JobManifest, error) {
+	if resolved == nil || resolved.Video == nil || resolved.Video.Playlist == nil || len(resolved.Video.Playlist.Segments) == 0 {
+		return nil, errors.New("goyt: invalid resolved HLS video presentation")
+	}
+
+	absDest, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	durSec := resolved.Video.Playlist.Duration.Seconds()
+
+	var tracks []HLSTrackState
+
+	// Track 0: Video (or combined)
+	videoRole := "video"
+	if resolved.Audio == nil {
+		videoRole = "combined"
+	}
+	var variantID *HLSVariantIdentity
+	if resolved.SelectedVariant != nil {
+		v := VariantToIdentity(*resolved.SelectedVariant)
+		variantID = &v
+	}
+
+	track0Segs := make([]HLSSegmentState, len(resolved.Video.Playlist.Segments))
+	for i, seg := range resolved.Video.Playlist.Segments {
+		track0Segs[i] = HLSSegmentState{
+			Index:           i,
+			DurationSeconds: seg.Duration.Seconds(),
+			URLFingerprint:  ComputeURLFingerprint(seg.URL),
+			RelativePath:    filepath.Join("hls", "gen-1", "track-0", fmt.Sprintf("segment-%05d.ts", i)),
+			Completed:       false,
+		}
+	}
+
+	target0 := 1
+	for _, seg := range resolved.Video.Playlist.Segments {
+		s := int(math.Ceil(seg.Duration.Seconds()))
+		if s > target0 {
+			target0 = s
+		}
+	}
+
+	tracks = append(tracks, HLSTrackState{
+		Index:           0,
+		Role:            videoRole,
+		Generation:      1,
+		Variant:         variantID,
+		TargetDuration:  target0,
+		DurationSeconds: resolved.Video.Playlist.Duration.Seconds(),
+		Segments:        track0Segs,
+	})
+
+	var audioID *HLSAudioIdentity
+	if resolved.Audio != nil && resolved.Audio.Playlist != nil && len(resolved.Audio.Playlist.Segments) > 0 {
+		if resolved.SelectedAudio != nil {
+			a := AudioToIdentity(*resolved.SelectedAudio)
+			audioID = &a
+		}
+
+		track1Segs := make([]HLSSegmentState, len(resolved.Audio.Playlist.Segments))
+		for i, seg := range resolved.Audio.Playlist.Segments {
+			track1Segs[i] = HLSSegmentState{
+				Index:           i,
+				DurationSeconds: seg.Duration.Seconds(),
+				URLFingerprint:  ComputeURLFingerprint(seg.URL),
+				RelativePath:    filepath.Join("hls", "gen-1", "track-1", fmt.Sprintf("segment-%05d", i)),
+				Completed:       false,
+			}
+		}
+
+		target1 := 1
+		for _, seg := range resolved.Audio.Playlist.Segments {
+			s := int(math.Ceil(seg.Duration.Seconds()))
+			if s > target1 {
+				target1 = s
+			}
+		}
+
+		tracks = append(tracks, HLSTrackState{
+			Index:           1,
+			Role:            "audio",
+			Generation:      1,
+			Audio:           audioID,
+			TargetDuration:  target1,
+			DurationSeconds: resolved.Audio.Playlist.Duration.Seconds(),
+			Segments:        track1Segs,
+		})
+	}
+
+	now := time.Now().UTC()
+	return &JobManifest{
+		SchemaVersion:   1,
+		JobID:           generateJobID(),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		SourceURL:       sourceURL,
+		VideoID:         videoID,
+		Title:           title,
+		DurationSeconds: &durSec,
+		DestinationPath: absDest,
+		Transport:       "hls",
+		Mode:            "video",
+		Stage:           JobStagePlanned,
+		Selection: JobSelection{
+			MaxHeight:     selection.MaxHeight,
+			VideoCodec:    selection.VideoCodec,
+			AudioCodec:    selection.AudioCodec,
+			Container:     selection.Container,
+			AllowSeparate: selection.AllowSeparate,
+			AudioLanguage: selection.AudioLanguage,
+		},
+		OutputContainer: "mp4",
+		DecodeCheck:     decodeCheck,
+		HLS: &JobHLSState{
+			Generation:      1,
+			SelectedVariant: variantID,
+			SelectedAudio:   audioID,
+			AudioIsOriginal: resolved.AudioIsOriginal,
+			AudioWarning:    resolved.AudioWarning,
+			Tracks:          tracks,
+		},
+	}, nil
+}
+
+// CreateHLSAudioJob creates an initialized JobManifest for an HLS audio-only download.
+func CreateHLSAudioJob(
+	sourceURL string,
+	videoID string,
+	title string,
+	destination string,
+	track *HLSTrack,
+	selectedAudio *HLSAudioRendition,
+	isOriginal bool,
+	warning string,
+	spec AudioOutputSpec,
+	selection AudioSelection,
+	decodeCheck bool,
+) (*JobManifest, error) {
+	if track == nil || track.Playlist == nil || len(track.Playlist.Segments) == 0 {
+		return nil, errors.New("goyt: invalid resolved HLS audio track")
+	}
+
+	absDest, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	durSec := track.Playlist.Duration.Seconds()
+
+	var audioID *HLSAudioIdentity
+	if selectedAudio != nil {
+		a := AudioToIdentity(*selectedAudio)
+		audioID = &a
+	}
+
+	segs := make([]HLSSegmentState, len(track.Playlist.Segments))
+	for i, seg := range track.Playlist.Segments {
+		segs[i] = HLSSegmentState{
+			Index:           i,
+			DurationSeconds: seg.Duration.Seconds(),
+			URLFingerprint:  ComputeURLFingerprint(seg.URL),
+			RelativePath:    filepath.Join("hls", "gen-1", "track-0", fmt.Sprintf("segment-%05d", i)),
+			Completed:       false,
+		}
+	}
+
+	target := 1
+	for _, seg := range track.Playlist.Segments {
+		s := int(math.Ceil(seg.Duration.Seconds()))
+		if s > target {
+			target = s
+		}
+	}
+
+	tracks := []HLSTrackState{
+		{
+			Index:           0,
+			Role:            "audio",
+			Generation:      1,
+			Audio:           audioID,
+			TargetDuration:  target,
+			DurationSeconds: track.Playlist.Duration.Seconds(),
+			Segments:        segs,
+		},
+	}
+
+	now := time.Now().UTC()
+	return &JobManifest{
+		SchemaVersion:   1,
+		JobID:           generateJobID(),
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		SourceURL:       sourceURL,
+		VideoID:         videoID,
+		Title:           title,
+		DurationSeconds: &durSec,
+		DestinationPath: absDest,
+		Transport:       "hls",
+		Mode:            "audio-only",
+		Stage:           JobStagePlanned,
+		Selection: JobSelection{
+			AudioLanguage: selection.AudioLanguage,
+			AudioFormat:   selection.AudioFormat,
+			AudioQuality:  selection.AudioQuality,
+			AudioBitrate:  selection.AudioBitrate,
+		},
+		AudioOutputSpec: &JobOutputSpec{
+			RequestedFormat: spec.RequestedFormat,
+			ResolvedCodec:   spec.ResolvedCodec,
+			Container:       spec.Container,
+			Extension:       spec.Extension,
+			Copy:            spec.Copy,
+			Encoder:         spec.Encoder,
+			Quality:         spec.Quality,
+			Bitrate:         spec.Bitrate,
+		},
+		DecodeCheck: decodeCheck,
+		HLS: &JobHLSState{
+			Generation:      1,
+			SelectedAudio:   audioID,
+			AudioIsOriginal: isOriginal,
+			AudioWarning:    warning,
+			Tracks:          tracks,
+		},
+	}, nil
+}
+
 // Save writes the manifest atomically to jobDir/job.json.
 func (m *JobManifest) Save(jobDir string) error {
 	m.UpdatedAt = time.Now().UTC()
@@ -372,9 +721,6 @@ func (m *JobManifest) Validate(jobDir string) error {
 	if strings.TrimSpace(m.DestinationPath) == "" || !filepath.IsAbs(m.DestinationPath) {
 		return fmt.Errorf("%w: destination_path must be a non-empty absolute path", ErrInvalidManifest)
 	}
-	if m.Transport != "http" {
-		return fmt.Errorf("%w: unsupported transport %q; only http is supported", ErrInvalidManifest, m.Transport)
-	}
 	if m.Mode != "video" && m.Mode != "audio-only" {
 		return fmt.Errorf("%w: invalid mode %q", ErrInvalidManifest, m.Mode)
 	}
@@ -385,20 +731,62 @@ func (m *JobManifest) Validate(jobDir string) error {
 		return fmt.Errorf("%w: invalid stage %q", ErrInvalidManifest, m.Stage)
 	}
 
-	if len(m.Streams) == 0 {
-		return fmt.Errorf("%w: manifest has no streams", ErrInvalidManifest)
-	}
-
-	for i, s := range m.Streams {
-		if s.Index != i {
-			return fmt.Errorf("%w: stream index mismatch at %d", ErrInvalidManifest, i)
+	switch m.Transport {
+	case "http":
+		if len(m.Streams) == 0 {
+			return fmt.Errorf("%w: manifest has no streams", ErrInvalidManifest)
 		}
-		if strings.TrimSpace(s.Format.ID) == "" {
-			return fmt.Errorf("%w: stream %d missing format ID", ErrInvalidManifest, i)
+		for i, s := range m.Streams {
+			if s.Index != i {
+				return fmt.Errorf("%w: stream index mismatch at %d", ErrInvalidManifest, i)
+			}
+			if strings.TrimSpace(s.Format.ID) == "" {
+				return fmt.Errorf("%w: stream %d missing format ID", ErrInvalidManifest, i)
+			}
+			if _, err := ValidateJobSubpath(jobDir, s.RelativePath); err != nil {
+				return err
+			}
 		}
-		if _, err := ValidateJobSubpath(jobDir, s.RelativePath); err != nil {
-			return err
+	case "hls":
+		if m.HLS == nil {
+			return fmt.Errorf("%w: missing HLS state for HLS transport", ErrInvalidManifest)
 		}
+		if m.HLS.Generation < 1 {
+			return fmt.Errorf("%w: invalid HLS generation %d", ErrInvalidManifest, m.HLS.Generation)
+		}
+		if len(m.HLS.Tracks) == 0 || len(m.HLS.Tracks) > 2 {
+			return fmt.Errorf("%w: invalid HLS track count %d", ErrInvalidManifest, len(m.HLS.Tracks))
+		}
+		for i, t := range m.HLS.Tracks {
+			if t.Index != i {
+				return fmt.Errorf("%w: track index mismatch at %d", ErrInvalidManifest, i)
+			}
+			if t.Role != "video" && t.Role != "audio" && t.Role != "combined" {
+				return fmt.Errorf("%w: invalid track role %q at %d", ErrInvalidManifest, t.Role, i)
+			}
+			if m.Mode == "audio-only" && t.Role != "audio" {
+				return fmt.Errorf("%w: audio-only mode cannot have %s track", ErrInvalidManifest, t.Role)
+			}
+			if len(t.Segments) == 0 || len(t.Segments) > 10000 {
+				return fmt.Errorf("%w: invalid segment count %d for track %d", ErrInvalidManifest, len(t.Segments), i)
+			}
+			for j, s := range t.Segments {
+				if s.Index != j {
+					return fmt.Errorf("%w: track %d segment index mismatch at %d", ErrInvalidManifest, i, j)
+				}
+				if s.DurationSeconds <= 0 {
+					return fmt.Errorf("%w: track %d segment %d has non-positive duration", ErrInvalidManifest, i, j)
+				}
+				if len(s.URLFingerprint) != 64 {
+					return fmt.Errorf("%w: track %d segment %d invalid URL fingerprint", ErrInvalidManifest, i, j)
+				}
+				if _, err := ValidateJobSubpath(jobDir, s.RelativePath); err != nil {
+					return err
+				}
+			}
+		}
+	default:
+		return fmt.Errorf("%w: unsupported transport %q; supported: http, hls", ErrInvalidManifest, m.Transport)
 	}
 
 	if m.PreCommit != nil && m.PreCommit.StagedRelativePath != "" {

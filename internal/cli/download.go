@@ -176,6 +176,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
 				return extractor.ExtractDownloadable(ctx, u)
 			},
+			HLSExtractor: func(ctx context.Context, u *url.URL) (goyt.Resource, *goyt.Media, error) {
+				ext, err := extractor.ExtractHLS(ctx, u)
+				if err != nil {
+					return goyt.Resource{}, nil, err
+				}
+				return ext.Manifest, ext.Media, nil
+			},
 			Downloader: goyt.NewDownloader(nil),
 			Processor:  processor,
 			Verifier:   verifier,
@@ -287,10 +294,6 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 	}
 
-	if jobDirSet && *transport != "http" {
-		return errors.New("persistent jobs currently support HTTP transport only")
-	}
-
 	u, err := url.Parse(*source)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -346,75 +349,170 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		fmt.Fprintln(stdout, "Job directory:", absJobDir)
 
 		var manifest *goyt.JobManifest
-		if *audioOnly {
-			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-			media, err := extractor.ExtractDownloadable(ctx, u)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
-			}
-
-			fmt.Fprintln(stdout, "Title:", media.Title)
-			audioSel := goyt.AudioSelection{
-				AudioLanguage: *audioLanguage,
-				AudioFormat:   *audioFormat,
-				AudioQuality:  qualPtr,
-				AudioBitrate:  *audioBitrate,
-			}
-			plan, err := goyt.PlanAudio(media, audioSel)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
-			}
-
-			if !outSet {
-				targetPath = filepath.Join(filepath.Dir(targetPath), "audio"+plan.OutputSpec.Extension)
-			} else if *audioFormat == goyt.AudioFormatBest {
-				if !strings.EqualFold(filepath.Ext(targetPath), plan.OutputSpec.Extension) {
+		if *transport == "hls" {
+			if *audioOnly {
+				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
+				extracted, err := extractor.ExtractHLS(ctx, u)
+				if err != nil {
 					_ = os.RemoveAll(absJobDir)
-					return fmt.Errorf("output extension %q does not match resolved %s source (expected %s)", filepath.Ext(targetPath), plan.OutputSpec.ResolvedCodec, plan.OutputSpec.Extension)
+					return err
 				}
-			}
 
-			if !plan.OutputSpec.Copy && plan.OutputSpec.Encoder != "" {
-				has, err := processor.HasEncoder(ctx, plan.OutputSpec.Encoder)
-				if err == nil && !has {
+				fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
+
+				hlsDownloader, err := goyt.NewHLSDownloader(nil, processor)
+				if err != nil {
 					_ = os.RemoveAll(absJobDir)
-					return fmt.Errorf("required FFmpeg audio encoder %q is not available", plan.OutputSpec.Encoder)
+					return err
 				}
-			}
 
-			manifest, err = goyt.CreateAudioJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, audioSel, *decode)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
+				track, selectedAudio, isOriginal, warning, err := hlsDownloader.ResolveAudioLanguage(ctx, extracted.Manifest, *audioLanguage)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				resolvedSpec, err := goyt.ResolveAudioOutputSpec(*audioFormat, "aac", qualPtr, *audioBitrate)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				if !outSet {
+					targetPath = filepath.Join(filepath.Dir(targetPath), "audio"+resolvedSpec.Extension)
+				} else if !strings.EqualFold(filepath.Ext(targetPath), resolvedSpec.Extension) {
+					_ = os.RemoveAll(absJobDir)
+					return fmt.Errorf("audio-only %s mode requires a %s output", *audioFormat, resolvedSpec.Extension)
+				}
+
+				if !resolvedSpec.Copy && resolvedSpec.Encoder != "" {
+					has, err := processor.HasEncoder(ctx, resolvedSpec.Encoder)
+					if err == nil && !has {
+						_ = os.RemoveAll(absJobDir)
+						return fmt.Errorf("required FFmpeg audio encoder %q is not available", resolvedSpec.Encoder)
+					}
+				}
+
+				audioSel := goyt.AudioSelection{
+					AudioLanguage: *audioLanguage,
+					AudioFormat:   *audioFormat,
+					AudioQuality:  qualPtr,
+					AudioBitrate:  *audioBitrate,
+				}
+
+				manifest, err = goyt.CreateHLSAudioJob(*source, extracted.Media.ID, extracted.Media.Title, targetPath, track, selectedAudio, isOriginal, warning, resolvedSpec, audioSel, *decode)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+			} else {
+				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
+				extracted, err := extractor.ExtractHLS(ctx, u)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
+
+				hlsDownloader, err := goyt.NewHLSDownloader(nil, processor)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				resolved, err := hlsDownloader.ResolvePlaylistLanguage(ctx, extracted.Manifest, *height, *audioLanguage)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				videoSel := goyt.Selection{
+					MaxHeight:     *height,
+					VideoCodec:    "h264",
+					AudioCodec:    "aac",
+					Container:     "mp4",
+					AllowSeparate: true,
+					AudioLanguage: *audioLanguage,
+				}
+
+				manifest, err = goyt.CreateHLSVideoJob(*source, extracted.Media.ID, extracted.Media.Title, targetPath, resolved, videoSel, *decode)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
 			}
 		} else {
-			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-			media, err := extractor.ExtractDownloadable(ctx, u)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
-			}
+			if *audioOnly {
+				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
+				media, err := extractor.ExtractDownloadable(ctx, u)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
 
-			fmt.Fprintln(stdout, "Title:", media.Title)
-			videoSel := goyt.Selection{
-				MaxHeight:     *height,
-				VideoCodec:    "h264",
-				AudioCodec:    "aac",
-				Container:     "mp4",
-				AllowSeparate: true,
-			}
-			plan, err := goyt.Plan(media, videoSel)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
-			}
+				fmt.Fprintln(stdout, "Title:", media.Title)
+				audioSel := goyt.AudioSelection{
+					AudioLanguage: *audioLanguage,
+					AudioFormat:   *audioFormat,
+					AudioQuality:  qualPtr,
+					AudioBitrate:  *audioBitrate,
+				}
+				plan, err := goyt.PlanAudio(media, audioSel)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
 
-			manifest, err = goyt.CreateVideoJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, videoSel, *decode)
-			if err != nil {
-				_ = os.RemoveAll(absJobDir)
-				return err
+				if !outSet {
+					targetPath = filepath.Join(filepath.Dir(targetPath), "audio"+plan.OutputSpec.Extension)
+				} else if *audioFormat == goyt.AudioFormatBest {
+					if !strings.EqualFold(filepath.Ext(targetPath), plan.OutputSpec.Extension) {
+						_ = os.RemoveAll(absJobDir)
+						return fmt.Errorf("output extension %q does not match resolved %s source (expected %s)", filepath.Ext(targetPath), plan.OutputSpec.ResolvedCodec, plan.OutputSpec.Extension)
+					}
+				}
+
+				if !plan.OutputSpec.Copy && plan.OutputSpec.Encoder != "" {
+					has, err := processor.HasEncoder(ctx, plan.OutputSpec.Encoder)
+					if err == nil && !has {
+						_ = os.RemoveAll(absJobDir)
+						return fmt.Errorf("required FFmpeg audio encoder %q is not available", plan.OutputSpec.Encoder)
+					}
+				}
+
+				manifest, err = goyt.CreateAudioJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, audioSel, *decode)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+			} else {
+				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
+				media, err := extractor.ExtractDownloadable(ctx, u)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				fmt.Fprintln(stdout, "Title:", media.Title)
+				videoSel := goyt.Selection{
+					MaxHeight:     *height,
+					VideoCodec:    "h264",
+					AudioCodec:    "aac",
+					Container:     "mp4",
+					AllowSeparate: true,
+				}
+				plan, err := goyt.Plan(media, videoSel)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
+
+				manifest, err = goyt.CreateVideoJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, videoSel, *decode)
+				if err != nil {
+					_ = os.RemoveAll(absJobDir)
+					return err
+				}
 			}
 		}
 
@@ -426,6 +524,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		runnerOpts := goyt.JobRunnerOptions{
 			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
 				return extractor.ExtractDownloadable(ctx, u)
+			},
+			HLSExtractor: func(ctx context.Context, u *url.URL) (goyt.Resource, *goyt.Media, error) {
+				ext, err := extractor.ExtractHLS(ctx, u)
+				if err != nil {
+					return goyt.Resource{}, nil, err
+				}
+				return ext.Manifest, ext.Media, nil
 			},
 			Downloader: goyt.NewDownloader(nil),
 			Processor:  processor,
