@@ -136,7 +136,8 @@ func (e *Executor) Execute(
 	}
 
 	if options.Download.MaxRetries < 0 ||
-		options.Download.RetryDelay < 0 {
+		options.Download.RetryDelay < 0 ||
+		options.Download.StallTimeout < 0 {
 		return nil, errors.New("goyt: invalid retry options")
 	}
 
@@ -319,7 +320,9 @@ func (e *Executor) ExecuteAudio(
 		return nil, err
 	}
 
-	if options.Download.MaxRetries < 0 || options.Download.RetryDelay < 0 {
+	if options.Download.MaxRetries < 0 ||
+		options.Download.RetryDelay < 0 ||
+		options.Download.StallTimeout < 0 {
 		return nil, errors.New("goyt: invalid retry options")
 	}
 

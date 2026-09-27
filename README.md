@@ -71,6 +71,12 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 
 # Download Opus audio via HTTP with explicit bitrate
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport http -audio-only -audio-format opus -audio-bitrate 160k -out audio.opus
+
+# Download with custom overall job timeout and network inactivity stall protection
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -timeout 2h -stall-timeout 45s
+
+# Download with CLI overall timeout disabled (only parent context applies)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -timeout 0
 ```
 
 **Flags:**
@@ -82,6 +88,8 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 - `-audio-bitrate`: Target audio bitrate for lossy encoders (e.g. `128k`, `192k`, `320k`). Supported for `aac`, `m4a`, `mp3`, `opus`, and `vorbis`. Disallowed for `best`, `alac`, `flac`, and `wav`. Mutually exclusive with `-audio-quality`.
 - `-height`: Maximum desired video height in pixels (default `1080`). Disallowed when explicitly specified in `-audio-only` mode.
 - `-audio-language`: Audio language tag, e.g. `en` or `en-US` (supports HLS and HTTP formats with language metadata).
+- `-timeout`: Overall job timeout covering extraction, downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline.
+- `-stall-timeout`: Network inactivity timeout per media request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
 - `-out`: Destination file path. In video mode, must have an `.mp4` extension (default `video.mp4`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
 - `-version`: Print `goyt` version.
@@ -219,6 +227,8 @@ Downloads arbitrary HLS master or media playlists directly from a URL:
 **Flags:**
 - `-url`: Completed MPEG-TS media playlist or master playlist URL (required).
 - `-height`: Maximum master-playlist variant height (default `1080`).
+- `-timeout`: Overall job timeout covering playlist fetching, segment downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline.
+- `-stall-timeout`: Network inactivity timeout per segment request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
 - `-out`: Destination file path, must have an `.mp4` extension (default `hls.mp4`).
 
 ### 4. Version & Help
@@ -334,6 +344,16 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Useful intermediate files are retained in the work directory and the directory path is reported on standard error for inspection.
 - On complete success and verification, the staged file is atomically committed to the destination.
 
+### Timeouts & Stalled-Transfer Recovery
+- **Overall Job Timeout (`-timeout`)**: Enforces a total wall-clock deadline spanning metadata extraction, playlist resolution, media downloads, FFmpeg processing, and verification checks (default `30m`). Setting `-timeout 0` disables the CLI-imposed overall deadline (any parent context deadline still applies).
+- **Network Inactivity Protection (`-stall-timeout` / `DownloadOptions.StallTimeout`)**: Monitors media transfers and cancels individual requests that hang while waiting for response headers or body bytes (default `60s`).
+  - The inactivity timer resets whenever data is received (`n > 0` bytes read). Slow transfers that continuously stream data will **not** be treated as stalled merely because the total transfer takes a long time.
+  - Non-network operations (disk writes, progress callbacks, retry backoff, FFmpeg conversion, and verification) are not counted against the network inactivity timeout.
+  - Stalled transfers yield an error wrapping `ErrDownloadStalled` and are retried within the configured `MaxRetries` budget (default 2 retries).
+  - Safe partial resumption is attempted when the server provides a strong ETag and valid byte ranges; otherwise the transfer restarts cleanly without appending corrupt data.
+  - Parent context cancellation (`context.Canceled`) and parent deadlines (`context.DeadlineExceeded`) take strict precedence over stall classification and immediately abort the job without retry.
+  - **Caller HTTP Client Configuration**: Custom `http.Client.Timeout` or custom `http.RoundTripper` implementations configured by library callers apply independently to HTTP operations; custom transport implementations that ignore request context cancellation will not benefit from request-scoped stall watchdog cancellation.
+
 ## Development Checks
 
 ```sh
@@ -382,11 +402,8 @@ separate from automated PASS results.
 - Individual HTTP transfers can resume matching partial files when the server
   provides a strong ETag and valid byte-range responses. Otherwise, transfers
   restart.
-- Executor merge/remux/audio-conversion jobs and HLS jobs retain intermediate files after
-  failure, but subsequent invocations do not automatically resume those jobs as whole operations.
+- Stalled-transfer recovery and HTTP range resumes operate within a single job execution up to the retry limit; failed jobs retain intermediate work directories for troubleshooting but cannot automatically resume as whole jobs across CLI restarts without restarting the command.
 - Full decoding checks decodability, not perceptual audio/video synchronization.
-- There is no dedicated stalled-transfer timeout. Cancellation and configured
-  context/client timeouts bound operations.
 
 ---
 

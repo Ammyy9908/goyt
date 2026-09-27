@@ -34,12 +34,14 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	audioFormat := flags.String("audio-format", "best", "output format for audio-only mode: best, aac, alac, flac, m4a, mp3, opus, vorbis, wav (default best)")
 	audioQuality := flags.Int("audio-quality", 2, "MP3 VBR quality: 0 (highest) to 9 (lowest), default 2")
 	audioBitrate := flags.String("audio-bitrate", "", "target audio bitrate for lossy encoders, e.g. 128k, 192k")
+	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
+	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 	showVersion := flags.Bool("version", false, "print goyt version")
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-out video.mp4] [-decode-check]
-  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-out audio.<ext>] [-decode-check]
+  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-out video.mp4] [-decode-check]
+  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-out audio.<ext>] [-decode-check]
   goyt download -help`)
 		flags.PrintDefaults()
 	}
@@ -153,6 +155,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 	}
 
+	if *timeout < 0 {
+		return errors.New("timeout cannot be negative")
+	}
+	if *stallTimeout < 0 {
+		return errors.New("stall-timeout cannot be negative")
+	}
+
 	u, err := url.Parse(*source)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -163,8 +172,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return errors.New("unsupported YouTube URL")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
 
 	processor, err := goyt.NewFFmpeg("")
 	if err != nil {
@@ -180,8 +192,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var resolvedSpec goyt.AudioOutputSpec
 
 	options := goyt.DownloadOptions{
-		Resume:     true,
-		MaxRetries: 2,
+		Resume:       true,
+		MaxRetries:   2,
+		StallTimeout: *stallTimeout,
 	}
 
 	if *audioOnly {

@@ -105,6 +105,10 @@ func TestSubcommandHelp(t *testing.T) {
 			if sc.name == "inspect" && !strings.Contains(stderr.String(), "-json") {
 				t.Fatalf("expected '-json' in inspect help, got: %q", stderr.String())
 			}
+			if (sc.name == "download" || sc.name == "hls") &&
+				(!strings.Contains(stderr.String(), "-timeout") || !strings.Contains(stderr.String(), "-stall-timeout")) {
+				t.Fatalf("expected '-timeout' and '-stall-timeout' in %s help, got: %q", sc.name, stderr.String())
+			}
 		})
 	}
 }
@@ -169,6 +173,16 @@ func TestDownloadFlagValidation(t *testing.T) {
 			name:    "unsupported lookalike music host",
 			args:    []string{"download", "-url", "https://music.youtube.com.example.org/watch?v=12345678901"},
 			wantErr: "unsupported YouTube URL",
+		},
+		{
+			name:    "negative timeout in download",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=12345678901", "-timeout", "-5m"},
+			wantErr: "timeout cannot be negative",
+		},
+		{
+			name:    "negative stall-timeout in download",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=12345678901", "-stall-timeout", "-10s"},
+			wantErr: "stall-timeout cannot be negative",
 		},
 	}
 
@@ -263,6 +277,16 @@ func TestHLSFlagValidation(t *testing.T) {
 			name:    "non mp4 output extension",
 			args:    []string{"hls", "-url", "https://example.com/live.m3u8", "-out", "video.ts"},
 			wantErr: "this command requires an .mp4 output",
+		},
+		{
+			name:    "negative timeout in hls",
+			args:    []string{"hls", "-url", "https://example.com/live.m3u8", "-timeout", "-1m"},
+			wantErr: "timeout cannot be negative",
+		},
+		{
+			name:    "negative stall-timeout in hls",
+			args:    []string{"hls", "-url", "https://example.com/live.m3u8", "-stall-timeout", "-30s"},
+			wantErr: "stall-timeout cannot be negative",
 		},
 	}
 

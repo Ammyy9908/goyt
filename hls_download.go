@@ -101,7 +101,7 @@ func (h *HLSDownloader) DownloadWithAudioLanguage(
 		return nil, errors.New("goyt: destination and positive height are required")
 	}
 
-	if options.MaxRetries < 0 || options.RetryDelay < 0 {
+	if options.MaxRetries < 0 || options.RetryDelay < 0 || options.StallTimeout < 0 {
 		return nil, errors.New("goyt: invalid retry options")
 	}
 
@@ -305,7 +305,7 @@ func (h *HLSDownloader) DownloadAudio(
 		}
 	}
 
-	if options.MaxRetries < 0 || options.RetryDelay < 0 {
+	if options.MaxRetries < 0 || options.RetryDelay < 0 || options.StallTimeout < 0 {
 		return nil, errors.New("goyt: invalid retry options")
 	}
 

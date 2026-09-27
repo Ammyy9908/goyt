@@ -21,10 +21,12 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	source := flags.String("url", "", "completed MPEG-TS media playlist URL")
 	output := flags.String("out", "hls.mp4", "output MP4 path")
 	maxHeight := flags.Int("height", 1080, "maximum master-playlist variant height")
+	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
+	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt hls -url PLAYLIST_URL [options]
-  goyt hls -url PLAYLIST_URL [-height 1080] [-out hls.mp4]
+  goyt hls -url PLAYLIST_URL [-height 1080] [-timeout 30m] [-stall-timeout 60s] [-out hls.mp4]
   goyt hls -help`)
 		flags.PrintDefaults()
 	}
@@ -38,12 +40,22 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return errors.New("usage: goyt hls -url PLAYLIST_URL -out FILE.mp4 [-height 1080]")
 	}
 
+	if *timeout < 0 {
+		return errors.New("timeout cannot be negative")
+	}
+	if *stallTimeout < 0 {
+		return errors.New("stall-timeout cannot be negative")
+	}
+
 	if !strings.EqualFold(filepath.Ext(*output), ".mp4") {
 		return errors.New("this command requires an .mp4 output")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	defer cancel()
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
 
 	processor, err := goyt.NewFFmpeg("")
 	if err != nil {
@@ -80,8 +92,9 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		stagedPath,
 		*maxHeight,
 		goyt.DownloadOptions{
-			Resume:     true,
-			MaxRetries: 2,
+			Resume:       true,
+			MaxRetries:   2,
+			StallTimeout: *stallTimeout,
 		},
 		func(p goyt.HLSProgress) {
 			fmt.Fprintf(

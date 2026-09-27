@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,9 +40,103 @@ type DownloadOptions struct {
 	// RetryDelay is the initial retry delay. Zero means one second.
 	RetryDelay time.Duration
 
+	// StallTimeout limits network inactivity during a media transfer.
+	// Zero disables inactivity detection.
+	StallTimeout time.Duration
+
 	// OnProgress runs synchronously. Keep it fast.
 	// TotalBytes may be unknown. Progress can reset if a transfer restarts.
 	OnProgress func(Progress)
+}
+
+// stallWatcher tracks request-scoped network inactivity.
+type stallWatcher struct {
+	parentCtx context.Context
+	cancel    context.CancelFunc
+	timeout   time.Duration
+	timer     *time.Timer
+	mu        sync.Mutex
+	stalled   bool
+	stopped   bool
+}
+
+func newStallWatcher(
+	parentCtx context.Context,
+	timeout time.Duration,
+) (context.Context, *stallWatcher) {
+	if timeout <= 0 {
+		return parentCtx, nil
+	}
+
+	reqCtx, cancel := context.WithCancel(parentCtx)
+	w := &stallWatcher{
+		parentCtx: parentCtx,
+		cancel:    cancel,
+		timeout:   timeout,
+	}
+
+	w.timer = time.AfterFunc(timeout, w.onTimeout)
+	return reqCtx, w
+}
+
+func (w *stallWatcher) onTimeout() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.stopped {
+		return
+	}
+
+	if w.parentCtx.Err() != nil {
+		return
+	}
+
+	w.stalled = true
+	w.cancel()
+}
+
+func (w *stallWatcher) Reset() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.stopped || w.stalled {
+		return
+	}
+
+	w.timer.Reset(w.timeout)
+}
+
+func (w *stallWatcher) IsStalled() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.parentCtx.Err() != nil {
+		return false
+	}
+
+	return w.stalled
+}
+
+func (w *stallWatcher) Stop() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.stopped = true
+	if w.timer != nil {
+		w.timer.Stop()
+	}
 }
 
 // DownloadResult describes a completed file.
@@ -147,7 +242,7 @@ func (d *Downloader) Download(
 		return nil, errors.New("goyt: destination is empty")
 	}
 
-	if options.MaxRetries < 0 || options.RetryDelay < 0 {
+	if options.MaxRetries < 0 || options.RetryDelay < 0 || options.StallTimeout < 0 {
 		return nil, errors.New("goyt: invalid retry options")
 	}
 
@@ -296,8 +391,13 @@ func (d *Downloader) attempt(
 		previous, offset = loadResume(partPath, statePath, key)
 	}
 
+	reqCtx, watcher := newStallWatcher(ctx, options.StallTimeout)
+	if watcher != nil {
+		defer watcher.Stop()
+	}
+
 	req, err := http.NewRequestWithContext(
-		ctx,
+		reqCtx,
 		http.MethodGet,
 		resource.URL,
 		nil,
@@ -323,6 +423,12 @@ func (d *Downloader) attempt(
 
 	resp, err := d.client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
+		}
+		if watcher.IsStalled() {
+			return nil, true, fmt.Errorf("%w: %v", ErrDownloadStalled, err)
+		}
 		return nil, true, fmt.Errorf("goyt: request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -412,7 +518,7 @@ func (d *Downloader) attempt(
 
 	report(0)
 
-	written, retry, err := copyDownload(ctx, file, resp.Body, report)
+	written, retry, err := copyDownload(ctx, file, resp.Body, watcher, report)
 	if err != nil {
 		return nil, retry, err
 	}
@@ -507,6 +613,7 @@ func copyDownload(
 	ctx context.Context,
 	dst io.Writer,
 	src io.Reader,
+	watcher *stallWatcher,
 	report func(int64),
 ) (int64, bool, error) {
 	buffer := make([]byte, 32*1024)
@@ -517,8 +624,12 @@ func copyDownload(
 			return total, false, err
 		}
 
+		watcher.Reset()
+
 		n, readErr := src.Read(buffer)
 		if n > 0 {
+			watcher.Reset()
+
 			written, writeErr := dst.Write(buffer[:n])
 			total += int64(written)
 			report(total)
@@ -535,6 +646,12 @@ func copyDownload(
 			return total, false, nil
 		}
 		if readErr != nil {
+			if ctx.Err() != nil {
+				return total, false, ctx.Err()
+			}
+			if watcher.IsStalled() {
+				return total, true, fmt.Errorf("%w: %v", ErrDownloadStalled, readErr)
+			}
 			return total, true, readErr
 		}
 	}

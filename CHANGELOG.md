@@ -4,6 +4,13 @@
 
 ### Added
 
+- Configurable overall job timeout in `goyt download` and `goyt hls` via `-timeout` (default `30m`, `0` disables).
+- Network inactivity (stall) detection for media transfers in `goyt download` and `goyt hls` via `-stall-timeout` (default `60s`, `0` disables).
+- Additive `StallTimeout` duration option in `DownloadOptions` for library callers (`0` disables, negative values rejected).
+- Stable exported error `ErrDownloadStalled` compatible with `errors.Is`.
+- Request-scoped stall watchdog interrupting stalled response headers or stalled body byte transfers (`n > 0` resets inactivity accounting; slow progressive transfers are not treated as stalled).
+- Inactivity retries bounded within `MaxRetries` budget reusing cancellation-aware backoff and strong-ETag partial resumption (or clean restarts on changed/ignored ranges).
+- Strict priority for parent cancellation (`context.Canceled`) and parent deadlines (`context.DeadlineExceeded`) over stall classification.
 - Machine-readable JSON output for `goyt inspect` via the `-json` flag (`goyt inspect -url URL [-client web|visionos|all] -json`).
 - Versioned inspect output schema (`schema_version: 1`) with explicit snake_case DTOs for safe, stable downstream consumption.
 - Normalized duration in seconds (`duration_seconds`), sorted unique video heights (`available_video_heights`), and honest original-audio heuristics (`original_hint`).
@@ -74,5 +81,5 @@
   be identified.
 - Failed processing and HLS jobs retain intermediate files but cannot
   automatically resume as whole jobs on a later invocation.
-- No dedicated stalled-transfer timeout.
+- Stalled-transfer recovery and HTTP range resumes operate within a single job execution up to the retry limit; failed jobs retain intermediate work directories but cannot automatically resume as whole jobs across CLI restarts without restarting the command.
 - Successful decoding does not verify language or perceptual synchronization.

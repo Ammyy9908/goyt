@@ -1,6 +1,9 @@
 package goyt
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type ErrorKind string
 
@@ -10,6 +13,9 @@ const (
 	ErrorExtraction     ErrorKind = "extraction_failed"
 	ErrorInvalidResult  ErrorKind = "invalid_result"
 )
+
+// ErrDownloadStalled indicates network inactivity during a media transfer exceeded the stall timeout.
+var ErrDownloadStalled = errors.New("goyt: download stalled")
 
 // ExtractionError preserves the failure category, adapter name,
 // and underlying cause.
