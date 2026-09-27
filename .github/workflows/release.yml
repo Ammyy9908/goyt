@@ -1,0 +1,138 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v0.1.0-rc.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-assets-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "Invalid release tag"
+            exit 1
+          fi
+
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag || github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Confirm release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release view "$RELEASE_TAG"
+
+      - name: Install FFmpeg for local integration tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Validate tagged source
+        run: |
+          go vet ./...
+          go test -race -count=1 -timeout=5m ./...
+          go test -race -tags=integration \
+            -run '^(TestFFmpegIntegration|TestExecutorIntegration)$' \
+            -count=1 -timeout=5m ./...
+
+      - name: Verify embedded version
+        shell: bash
+        run: |
+          go build -o ./release-check ./cmd/goyt
+          actual=$(./release-check -version)
+          expected="${RELEASE_TAG#v}"
+
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Version mismatch: binary=$actual tag=$expected"
+            exit 1
+          fi
+
+      - name: Build and package
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist packages
+
+          for target in \
+            darwin/amd64 \
+            darwin/arm64 \
+            linux/amd64 \
+            linux/arm64 \
+            windows/amd64 \
+            windows/arm64
+          do
+            target_os="${target%/*}"
+            target_arch="${target#*/}"
+            package="goyt_${RELEASE_TAG}_${target_os}_${target_arch}"
+            package_dir="$PWD/packages/$package"
+
+            mkdir -p "$package_dir"
+
+            extension=""
+            if [[ "$target_os" == "windows" ]]; then
+              extension=".exe"
+            fi
+
+            for command in goyt goyt-inspect goyt-hls
+            do
+              GOOS="$target_os" GOARCH="$target_arch" \
+                go build -trimpath \
+                -o "$package_dir/${command}${extension}" \
+                "./cmd/$command"
+            done
+
+            cp README.md LICENSE "$package_dir/"
+
+            if [[ "$target_os" == "windows" ]]; then
+              (
+                cd packages
+                zip -qr "../dist/${package}.zip" "$package"
+              )
+            else
+              tar -czf "dist/${package}.tar.gz" \
+                -C packages "$package"
+            fi
+          done
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" dist/*
