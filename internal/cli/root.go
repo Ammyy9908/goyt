@@ -49,8 +49,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-out video.mp4] [-decode-check]
-  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-out audio.<ext>] [-decode-check]
+  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.mp4] [-decode-check]
+  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt inspect -url URL [-client web|visionos|all] [-json]
   goyt hls -url PLAYLIST_URL [-height 1080] [-timeout 30m] [-stall-timeout 60s] [-out hls.mp4]
   goyt -version

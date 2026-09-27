@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Persistent HTTP download jobs in `goyt download` for video and audio-only downloads via `-job-dir DIR` (fails if directory exists; requires HTTP transport).
+- Persistent job resumption in `goyt download` via `-resume-job DIR`, restoring source URL, selection, audio settings, decode check choices, and output paths from the job manifest.
+- Rejection of source, selection, audio, and output flag overrides on `-resume-job` (`-url`, `-out`, `-height`, `-transport`, `-decode-check`, `-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`, `-audio-language`) with clear errors.
+- Support for operational parameter overrides on `-resume-job` (`-timeout`, `-stall-timeout`, `-url-refreshes`), granting fresh overall deadlines and fresh URL refresh budgets per invocation.
+- Versioned JSON job manifest (`schema_version: 1`) with atomic file writes and restricted file permissions (`0600`), persisting job ID, canonical source URL, video ID, absolute destination, transport mode, stream identities, audio settings, stages, relative file paths, byte sizes, and SHA-256 hashes.
+- OS-backed kernel-held non-blocking exclusive file lock (`flock` on Unix, `LockFileEx` on Windows) on `job.lock` held for the duration of the job invocation and automatically released on process exit or crash.
+- Local SHA-256 integrity verification and reuse of completed input streams without network access; fully completed inputs proceed to merge/remux/conversion and verification offline without extraction requests.
+- Pinned representation re-extraction for incomplete streams (`MatchRefreshedFormat`) matching original format itag, container, codecs, dimensions, and audio track metadata without re-running format selection heuristics.
+- Safe partial stream resumption via strong ETag / Content-Range checks, safely restarting from byte 0 when media URLs refresh.
+- Pre-commit state recording (final SHA-256 and byte size), destination-filesystem staging, and crash-window recovery across destination renames.
+- Automatic cleanup of intermediate input and partial files upon successful destination commit, retaining a lightweight manifest for idempotent resume.
+- Idempotent resumption of completed jobs verifying final output identity (SHA-256 and size) without network requests, returning `ErrCompletedOutputMismatch` if the output was removed or modified.
+- Untrusted state validation (`ValidateJobSubpath`) rejecting directory traversal, absolute paths, and symlinks in job manifests.
+- Exported typed errors: `ErrJobLocked`, `ErrJobExists`, `ErrJobNotFound`, `ErrInvalidManifest`, `ErrUnsupportedManifestVersion`, `ErrSelectionUnavailable`, `ErrInputIntegrityMismatch`, `ErrCompletedOutputMismatch`, and `ErrInvalidJobPath`.
+- Recovery diagnostics for retry and restart events reporting whether a transfer resumes or restarts, the failure reason, prior downloaded byte offset, and action rationale without logging sensitive URLs or secrets.
+- An interrupted HTTP transfer may restart the affected stream from zero when safe byte-range resumption cannot be established, such as when a strong ETag is unavailable or the server ignores the range request. This can increase download time and bandwidth usage. Recovery diagnostics report whether a transfer resumes or restarts.
+
 ## [0.1.0-rc.5] - 2026-09-27
 
 ### Added

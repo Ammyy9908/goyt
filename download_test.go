@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,5 +257,251 @@ func TestDownloadCancellation(t *testing.T) {
 
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("canceled download must not become the final file")
+	}
+}
+
+func TestSanitizeError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: "",
+		},
+		{
+			name: "plain error",
+			err:  errors.New("unexpected EOF"),
+			want: "unexpected EOF",
+		},
+		{
+			name: "url error with query parameters",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://rr1---sn-abc.googlevideo.com/videoplayback?expire=12345&sig=secrettoken",
+				Err: errors.New("read: connection reset by peer"),
+			},
+			want: "Get: read: connection reset by peer",
+		},
+		{
+			name: "embedded URL in error string",
+			err:  errors.New("failed fetching https://secret.host.com/path?token=123: timeout"),
+			want: "failed fetching : timeout",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeError(tc.err)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDownloadRetryDiagnostics_RestartNoETag(t *testing.T) {
+	const content = "1234567890abcdefghij" // 20 bytes
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requests.Add(1)
+		if count == 1 {
+			// No ETag header sent on attempt 0; write 10 bytes then abort
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(content[:10]))
+			return
+		}
+		// Attempt 1: full response
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(content))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	var retryEvents []RetryDiagnostic
+	var progressEvents []int64
+
+	_, err := NewDownloader(server.Client()).Download(
+		context.Background(),
+		Resource{URL: server.URL},
+		path,
+		DownloadOptions{
+			Resume:     true,
+			MaxRetries: 1,
+			RetryDelay: time.Millisecond,
+			OnProgress: func(p Progress) {
+				progressEvents = append(progressEvents, p.DownloadedBytes)
+			},
+			OnRetry: func(diag RetryDiagnostic) {
+				retryEvents = append(retryEvents, diag)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertDownloadFile(t, path, content)
+
+	if len(retryEvents) != 1 {
+		t.Fatalf("expected 1 retry event, got %d", len(retryEvents))
+	}
+	diag := retryEvents[0]
+	if diag.Attempt != 1 {
+		t.Errorf("expected attempt 1, got %d", diag.Attempt)
+	}
+	if diag.Resumed {
+		t.Error("expected Resumed to be false because no strong ETag was provided")
+	}
+	if diag.PriorOffset != 10 {
+		t.Errorf("expected PriorOffset 10, got %d", diag.PriorOffset)
+	}
+	if !strings.Contains(diag.ActionReason, "strong ETag") {
+		t.Errorf("unexpected ActionReason: %s", diag.ActionReason)
+	}
+
+	// Verify progress reset happened: progress reached 10, then reset to 0 upon restart
+	hasReset := false
+	for i := 1; i < len(progressEvents); i++ {
+		if progressEvents[i] < progressEvents[i-1] {
+			hasReset = true
+			break
+		}
+	}
+	if !hasReset {
+		t.Errorf("expected progress reset event in progress stream: %v", progressEvents)
+	}
+}
+
+func TestDownloadRetryDiagnostics_RestartFull200Response(t *testing.T) {
+	const content = "1234567890abcdefghij" // 20 bytes
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requests.Add(1)
+		w.Header().Set("ETag", `"v1"`)
+		if count == 1 {
+			// Write 10 bytes then abort
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(content[:10]))
+			return
+		}
+		// Attempt 1: server ignores Range and sends full 200 OK
+		w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(content))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	var retryEvents []RetryDiagnostic
+
+	_, err := NewDownloader(server.Client()).Download(
+		context.Background(),
+		Resource{URL: server.URL},
+		path,
+		DownloadOptions{
+			Resume:     true,
+			MaxRetries: 1,
+			RetryDelay: time.Millisecond,
+			OnRetry: func(diag RetryDiagnostic) {
+				retryEvents = append(retryEvents, diag)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertDownloadFile(t, path, content)
+
+	if len(retryEvents) != 1 {
+		t.Fatalf("expected 1 retry event, got %d", len(retryEvents))
+	}
+	diag := retryEvents[0]
+	if diag.Resumed {
+		t.Error("expected Resumed to be false because server responded with 200 OK")
+	}
+	if diag.PriorOffset != 10 {
+		t.Errorf("expected PriorOffset 10, got %d", diag.PriorOffset)
+	}
+	if !strings.Contains(diag.ActionReason, "200 OK instead of 206") {
+		t.Errorf("unexpected ActionReason: %s", diag.ActionReason)
+	}
+}
+
+func TestDownloadRetryDiagnostics_ResumePartial206(t *testing.T) {
+	const content = "1234567890abcdefghij" // 20 bytes
+	var requests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := requests.Add(1)
+		w.Header().Set("ETag", `"v1"`)
+		if count == 1 {
+			// Attempt 0: write 10 bytes then abort
+			w.Header().Set("Content-Length", fmt.Sprint(len(content)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(content[:10]))
+			return
+		}
+		// Attempt 1: serve 206 Partial Content
+		if r.Header.Get("Range") != "bytes=10-" || r.Header.Get("If-Range") != `"v1"` {
+			t.Errorf("missing or incorrect resume headers: Range=%q, If-Range=%q", r.Header.Get("Range"), r.Header.Get("If-Range"))
+		}
+		w.Header().Set("Content-Range", "bytes 10-19/20")
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte(content[10:]))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	var retryEvents []RetryDiagnostic
+	var progressEvents []int64
+
+	_, err := NewDownloader(server.Client()).Download(
+		context.Background(),
+		Resource{URL: server.URL},
+		path,
+		DownloadOptions{
+			Resume:     true,
+			MaxRetries: 1,
+			RetryDelay: time.Millisecond,
+			OnProgress: func(p Progress) {
+				progressEvents = append(progressEvents, p.DownloadedBytes)
+			},
+			OnRetry: func(diag RetryDiagnostic) {
+				retryEvents = append(retryEvents, diag)
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertDownloadFile(t, path, content)
+
+	if len(retryEvents) != 1 {
+		t.Fatalf("expected 1 retry event, got %d", len(retryEvents))
+	}
+	diag := retryEvents[0]
+	if !diag.Resumed {
+		t.Error("expected Resumed to be true for validated 206 response")
+	}
+	if diag.PriorOffset != 10 {
+		t.Errorf("expected PriorOffset 10, got %d", diag.PriorOffset)
+	}
+
+	// Verify progress did NOT reset to 0: monotonically non-decreasing
+	for i := 1; i < len(progressEvents); i++ {
+		if progressEvents[i] < progressEvents[i-1] {
+			t.Fatalf("resumed download should not have progress decrease: %v", progressEvents)
+		}
 	}
 }

@@ -74,7 +74,7 @@ jobs:
           GOYT_REQUIRE_ALL_ENCODERS: "true"
         run: |
           go test -race -tags=integration \
-            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestDecodeFailurePreservesExistingDestination)$' \
+            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestDecodeFailurePreservesExistingDestination|TestJobIntegration)$' \
             -count=1 -timeout=5m -v ./...
 
       - name: Build commands

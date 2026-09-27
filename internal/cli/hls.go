@@ -23,6 +23,8 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	maxHeight := flags.Int("height", 1080, "maximum master-playlist variant height")
 	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
 	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
+	jobDir := flags.String("job-dir", "", "")
+	resumeJob := flags.String("resume-job", "", "")
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt hls -url PLAYLIST_URL [options]
@@ -33,6 +35,20 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+
+	var jobDirSet, resumeJobSet bool
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "job-dir":
+			jobDirSet = true
+		case "resume-job":
+			resumeJobSet = true
+		}
+	})
+
+	if jobDirSet || resumeJobSet || *jobDir != "" || *resumeJob != "" {
+		return errors.New("persistent jobs are not supported in goyt hls; use goyt download")
 	}
 
 	if *source == "" || flags.NArg() != 0 || *maxHeight <= 0 {

@@ -1,0 +1,339 @@
+package goyt
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestJobManifestValidation(t *testing.T) {
+	tempDir := t.TempDir()
+	destPath := filepath.Join(tempDir, "output.mp4")
+
+	t.Run("valid video job manifest", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job1")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateVideoJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"Test Video",
+			nil,
+			destPath,
+			&DownloadPlan{
+				MediaID:         "abcdefghijk",
+				Title:           "Test Video",
+				OutputContainer: "mp4",
+				Streams: []Format{
+					{
+						ID:        "137",
+						Protocol:  "http",
+						Container: "mp4",
+					},
+					{
+						ID:        "140",
+						Protocol:  "http",
+						Container: "m4a",
+					},
+				},
+				NeedsMerge: true,
+			},
+			Selection{MaxHeight: 1080, Container: "mp4", AllowSeparate: true},
+			false,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating job: %v", err)
+		}
+
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+
+		if loaded.JobID != manifest.JobID {
+			t.Fatalf("got job ID %q, want %q", loaded.JobID, manifest.JobID)
+		}
+		if len(loaded.Streams) != 2 {
+			t.Fatalf("got %d streams, want 2", len(loaded.Streams))
+		}
+		if loaded.Mode != "video" {
+			t.Fatalf("got mode %q, want video", loaded.Mode)
+		}
+	})
+
+	t.Run("valid audio-only job manifest", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-audio")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		manifest, err := CreateAudioJob(
+			"https://www.youtube.com/watch?v=abcdefghijk",
+			"abcdefghijk",
+			"Test Audio",
+			nil,
+			filepath.Join(tempDir, "audio.mp3"),
+			&AudioPlan{
+				Stream: Format{
+					ID:        "140",
+					Protocol:  "http",
+					Container: "m4a",
+				},
+				OutputSpec: AudioOutputSpec{
+					RequestedFormat: "mp3",
+					ResolvedCodec:   "mp3",
+					Container:       "mp3",
+					Extension:       ".mp3",
+					Encoder:         "libmp3lame",
+					Quality:         2,
+				},
+			},
+			AudioSelection{AudioFormat: "mp3"},
+			true,
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating audio job: %v", err)
+		}
+
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatalf("failed to save manifest: %v", err)
+		}
+
+		loaded, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+
+		if loaded.Mode != "audio-only" {
+			t.Fatalf("got mode %q, want audio-only", loaded.Mode)
+		}
+		if loaded.AudioOutputSpec == nil || loaded.AudioOutputSpec.Encoder != "libmp3lame" {
+			t.Fatalf("unexpected audio output spec: %+v", loaded.AudioOutputSpec)
+		}
+		if !loaded.DecodeCheck {
+			t.Fatal("expected DecodeCheck to be true")
+		}
+	})
+
+	t.Run("unsupported manifest version", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-unsupported-version")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		data := `{
+			"schema_version": 99,
+			"job_id": "test-job-99",
+			"source_url": "https://www.youtube.com/watch?v=abcdefghijk",
+			"video_id": "abcdefghijk",
+			"destination_path": "` + destPath + `",
+			"transport": "http",
+			"mode": "video",
+			"stage": "planned",
+			"streams": [{"index": 0, "format": {"id": "18"}, "relative_path": "inputs/stream-0.media"}]
+		}`
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatal("expected error for unsupported manifest version, got nil")
+		}
+		if !errors.Is(err, ErrUnsupportedManifestVersion) {
+			t.Fatalf("expected ErrUnsupportedManifestVersion, got: %v", err)
+		}
+	})
+
+	t.Run("corrupted manifest JSON", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-corrupted")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte("{not valid json..."), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatal("expected error for corrupted manifest, got nil")
+		}
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("expected ErrInvalidManifest, got: %v", err)
+		}
+	})
+
+	t.Run("missing manifest file", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "job-missing")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := LoadJobManifest(jobDir)
+		if err == nil {
+			t.Fatal("expected error for missing manifest, got nil")
+		}
+		if !errors.Is(err, ErrJobNotFound) {
+			t.Fatalf("expected ErrJobNotFound, got: %v", err)
+		}
+	})
+}
+
+func TestJobPathTraversalAndSymlinkRejection(t *testing.T) {
+	jobDir := t.TempDir()
+
+	t.Run("rejects relative path with parent traversal", func(t *testing.T) {
+		_, err := ValidateJobSubpath(jobDir, "../outside.txt")
+		if err == nil {
+			t.Fatal("expected error for parent directory traversal, got nil")
+		}
+		if !errors.Is(err, ErrInvalidJobPath) {
+			t.Fatalf("expected ErrInvalidJobPath, got: %v", err)
+		}
+	})
+
+	t.Run("rejects absolute path", func(t *testing.T) {
+		_, err := ValidateJobSubpath(jobDir, "/etc/passwd")
+		if err == nil {
+			t.Fatal("expected error for absolute path, got nil")
+		}
+		if !errors.Is(err, ErrInvalidJobPath) {
+			t.Fatalf("expected ErrInvalidJobPath, got: %v", err)
+		}
+	})
+
+	t.Run("rejects symlinked file inside job directory", func(t *testing.T) {
+		targetFile := filepath.Join(t.TempDir(), "target.txt")
+		if err := os.WriteFile(targetFile, []byte("secret"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		symlinkPath := filepath.Join(jobDir, "symlink_file.txt")
+		if err := os.Symlink(targetFile, symlinkPath); err != nil {
+			t.Skip("symlinks not supported on this environment:", err)
+		}
+
+		_, err := ValidateJobSubpath(jobDir, "symlink_file.txt")
+		if err == nil {
+			t.Fatal("expected error for symlinked file, got nil")
+		}
+		if !errors.Is(err, ErrInvalidJobPath) {
+			t.Fatalf("expected ErrInvalidJobPath, got: %v", err)
+		}
+	})
+
+	t.Run("accepts clean subpath", func(t *testing.T) {
+		target, err := ValidateJobSubpath(jobDir, "inputs/stream-0.media")
+		if err != nil {
+			t.Fatalf("unexpected error for clean subpath: %v", err)
+		}
+		expected := filepath.Join(jobDir, "inputs", "stream-0.media")
+		if target != expected {
+			t.Fatalf("got %q, want %q", target, expected)
+		}
+	})
+}
+
+func TestJobExclusiveLock(t *testing.T) {
+	jobDir := t.TempDir()
+
+	lock1, err := AcquireJobLock(jobDir)
+	if err != nil {
+		t.Fatalf("unexpected error acquiring lock 1: %v", err)
+	}
+
+	// Second acquire on the same job must fail with ErrJobLocked
+	_, err = AcquireJobLock(jobDir)
+	if err == nil {
+		t.Fatal("expected error acquiring locked job, got nil")
+	}
+	if !errors.Is(err, ErrJobLocked) {
+		t.Fatalf("expected ErrJobLocked, got: %v", err)
+	}
+
+	// Close lock1 and verify lock2 can now be acquired
+	if err := lock1.Close(); err != nil {
+		t.Fatalf("error closing lock 1: %v", err)
+	}
+
+	lock2, err := AcquireJobLock(jobDir)
+	if err != nil {
+		t.Fatalf("unexpected error acquiring lock 2 after unlock: %v", err)
+	}
+	_ = lock2.Close()
+}
+
+// TestJobLockSubprocess tests that lock is held across separate processes and automatically
+// released when the child process terminates or is killed.
+func TestJobLockSubprocess(t *testing.T) {
+	if os.Getenv("GOYT_TEST_LOCK_HELPER") == "1" {
+		jobDir := os.Getenv("GOYT_TEST_LOCK_JOBDIR")
+		lock, err := AcquireJobLock(jobDir)
+		if err != nil {
+			os.Exit(2)
+		}
+		defer lock.Close()
+		// Signal ready to parent by writing file
+		_ = os.WriteFile(filepath.Join(jobDir, "ready.txt"), []byte("ready"), 0600)
+		time.Sleep(10 * time.Second)
+		return
+	}
+
+	jobDir := t.TempDir()
+
+	// Start helper subprocess that holds lock
+	cmd := exec.Command(os.Args[0], "-test.run=^TestJobLockSubprocess$")
+	cmd.Env = append(os.Environ(),
+		"GOYT_TEST_LOCK_HELPER=1",
+		"GOYT_TEST_LOCK_JOBDIR="+jobDir,
+	)
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start lock helper subprocess: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	// Wait for helper to acquire lock and become ready
+	readyFile := filepath.Join(jobDir, "ready.txt")
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(readyFile); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Attempt to acquire lock while child is running
+	_, err := AcquireJobLock(jobDir)
+	if err == nil {
+		t.Fatal("expected lock collision with running child process, got nil")
+	}
+	if !errors.Is(err, ErrJobLocked) {
+		t.Fatalf("expected ErrJobLocked from child process, got: %v", err)
+	}
+
+	// Kill child process abruptly (SIGKILL / Kill)
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+
+	// Lock must be released by OS immediately upon child death
+	lock, err := AcquireJobLock(jobDir)
+	if err != nil {
+		t.Fatalf("expected lock acquisition after child death, got error: %v", err)
+	}
+	_ = lock.Close()
+}

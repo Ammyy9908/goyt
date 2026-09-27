@@ -37,12 +37,15 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
 	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 	urlRefreshes := flags.Int("url-refreshes", 1, "maximum URL re-extractions on expired or forbidden media (0 disables)")
+	jobDir := flags.String("job-dir", "", "directory path to create and persist a new download job")
+	resumeJob := flags.String("resume-job", "", "directory path of an existing persistent download job to resume")
 	showVersion := flags.Bool("version", false, "print goyt version")
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-out video.mp4] [-decode-check]
-  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-out audio.<ext>] [-decode-check]
+  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.mp4] [-decode-check]
+  goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
 		flags.PrintDefaults()
 	}
@@ -56,26 +59,154 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return nil
 	}
 
-	if *source == "" || flags.NArg() != 0 {
-		flags.Usage()
-		return errors.New("usage: goyt download -url URL [options]")
-	}
-
-	var heightSet, audioFormatSet, audioQualitySet, audioBitrateSet, outSet bool
+	var (
+		heightSet, audioFormatSet, audioQualitySet, audioBitrateSet, outSet bool
+		urlSet, transportSet, decodeSet, audioOnlySet, audioLanguageSet     bool
+		jobDirSet, resumeJobSet                                             bool
+	)
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
+		case "url":
+			urlSet = true
+		case "out":
+			outSet = true
 		case "height":
 			heightSet = true
+		case "transport":
+			transportSet = true
+		case "decode-check":
+			decodeSet = true
+		case "audio-only":
+			audioOnlySet = true
 		case "audio-format":
 			audioFormatSet = true
 		case "audio-quality":
 			audioQualitySet = true
 		case "audio-bitrate":
 			audioBitrateSet = true
-		case "out":
-			outSet = true
+		case "audio-language":
+			audioLanguageSet = true
+		case "job-dir":
+			jobDirSet = true
+		case "resume-job":
+			resumeJobSet = true
 		}
 	})
+
+	if jobDirSet && resumeJobSet {
+		return errors.New("-job-dir and -resume-job are mutually exclusive")
+	}
+
+	if *timeout < 0 {
+		return errors.New("timeout cannot be negative")
+	}
+	if *stallTimeout < 0 {
+		return errors.New("stall-timeout cannot be negative")
+	}
+	if *urlRefreshes < 0 {
+		return errors.New("url-refreshes cannot be negative")
+	}
+
+	// -------------------------------------------------------------
+	// Mode 1: Resume an existing persistent job (-resume-job)
+	// -------------------------------------------------------------
+	if resumeJobSet {
+		if flags.NArg() != 0 {
+			flags.Usage()
+			return errors.New("usage: goyt download -resume-job DIR [options]")
+		}
+
+		// Reject source/selection/output overrides
+		if urlSet {
+			return errors.New("flag -url cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if outSet {
+			return errors.New("flag -out cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if heightSet {
+			return errors.New("flag -height cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if transportSet {
+			return errors.New("flag -transport cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if decodeSet {
+			return errors.New("flag -decode-check cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if audioOnlySet {
+			return errors.New("flag -audio-only cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if audioFormatSet {
+			return errors.New("flag -audio-format cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if audioQualitySet {
+			return errors.New("flag -audio-quality cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if audioBitrateSet {
+			return errors.New("flag -audio-bitrate cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if audioLanguageSet {
+			return errors.New("flag -audio-language cannot be specified with -resume-job (loaded from saved job)")
+		}
+
+		absJobDir, err := filepath.Abs(*resumeJob)
+		if err != nil {
+			return err
+		}
+		if info, err := os.Stat(absJobDir); err != nil || !info.IsDir() {
+			return fmt.Errorf("%w: %s", goyt.ErrJobNotFound, *resumeJob)
+		}
+
+		if *timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, *timeout)
+			defer cancel()
+		}
+
+		processor, err := goyt.NewFFmpeg("")
+		if err != nil {
+			return err
+		}
+		verifier, err := goyt.NewVerifier("")
+		if err != nil {
+			return err
+		}
+		extractor := youtube.New(nil)
+
+		runnerOpts := goyt.JobRunnerOptions{
+			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
+				return extractor.ExtractDownloadable(ctx, u)
+			},
+			Downloader: goyt.NewDownloader(nil),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: goyt.DownloadOptions{
+				Resume:       true,
+				MaxRetries:   2,
+				StallTimeout: *stallTimeout,
+			},
+			URLRefreshes: *urlRefreshes,
+			Stdout:       stdout,
+			Stderr:       stderr,
+		}
+
+		fmt.Fprintln(stdout, "Resuming persistent job from:", absJobDir)
+		err = goyt.ExecuteJob(ctx, absJobDir, runnerOpts)
+		if err != nil {
+			if !errors.Is(err, goyt.ErrCompletedOutputMismatch) && !errors.Is(err, goyt.ErrJobLocked) && !errors.Is(err, goyt.ErrInvalidManifest) && !errors.Is(err, goyt.ErrUnsupportedManifestVersion) && !errors.Is(err, goyt.ErrInvalidJobPath) {
+				fmt.Fprintf(stderr, "To resume this job, run:\n  goyt download -resume-job %s\n", *resumeJob)
+			}
+			return err
+		}
+		return nil
+	}
+
+	// -------------------------------------------------------------
+	// Mode 2 & 3: New download (persistent via -job-dir or ephemeral)
+	// -------------------------------------------------------------
+	if *source == "" || flags.NArg() != 0 {
+		flags.Usage()
+		return errors.New("usage: goyt download -url URL [options]")
+	}
 
 	*audioLanguage = strings.TrimSpace(*audioLanguage)
 
@@ -156,14 +287,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 	}
 
-	if *timeout < 0 {
-		return errors.New("timeout cannot be negative")
-	}
-	if *stallTimeout < 0 {
-		return errors.New("stall-timeout cannot be negative")
-	}
-	if *urlRefreshes < 0 {
-		return errors.New("url-refreshes cannot be negative")
+	if jobDirSet && *transport != "http" {
+		return errors.New("persistent jobs currently support HTTP transport only")
 	}
 
 	u, err := url.Parse(*source)
@@ -191,6 +316,140 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return err
 	}
 
+	// -------------------------------------------------------------
+	// Persistent Job Creation (-job-dir)
+	// -------------------------------------------------------------
+	if jobDirSet {
+		absJobDir, err := filepath.Abs(*jobDir)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(absJobDir); err == nil {
+			return fmt.Errorf("%w: %s", goyt.ErrJobExists, *jobDir)
+		}
+
+		targetPath, err := filepath.Abs(*output)
+		if err != nil {
+			return err
+		}
+
+		var qualPtr *int
+		if audioQualitySet {
+			q := *audioQuality
+			qualPtr = &q
+		}
+
+		if err := os.MkdirAll(absJobDir, 0700); err != nil {
+			return err
+		}
+
+		fmt.Fprintln(stdout, "Job directory:", absJobDir)
+
+		var manifest *goyt.JobManifest
+		if *audioOnly {
+			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
+			media, err := extractor.ExtractDownloadable(ctx, u)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+
+			fmt.Fprintln(stdout, "Title:", media.Title)
+			audioSel := goyt.AudioSelection{
+				AudioLanguage: *audioLanguage,
+				AudioFormat:   *audioFormat,
+				AudioQuality:  qualPtr,
+				AudioBitrate:  *audioBitrate,
+			}
+			plan, err := goyt.PlanAudio(media, audioSel)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+
+			if !outSet {
+				targetPath = filepath.Join(filepath.Dir(targetPath), "audio"+plan.OutputSpec.Extension)
+			} else if *audioFormat == goyt.AudioFormatBest {
+				if !strings.EqualFold(filepath.Ext(targetPath), plan.OutputSpec.Extension) {
+					_ = os.RemoveAll(absJobDir)
+					return fmt.Errorf("output extension %q does not match resolved %s source (expected %s)", filepath.Ext(targetPath), plan.OutputSpec.ResolvedCodec, plan.OutputSpec.Extension)
+				}
+			}
+
+			if !plan.OutputSpec.Copy && plan.OutputSpec.Encoder != "" {
+				has, err := processor.HasEncoder(ctx, plan.OutputSpec.Encoder)
+				if err == nil && !has {
+					_ = os.RemoveAll(absJobDir)
+					return fmt.Errorf("required FFmpeg audio encoder %q is not available", plan.OutputSpec.Encoder)
+				}
+			}
+
+			manifest, err = goyt.CreateAudioJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, audioSel, *decode)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+		} else {
+			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
+			media, err := extractor.ExtractDownloadable(ctx, u)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+
+			fmt.Fprintln(stdout, "Title:", media.Title)
+			videoSel := goyt.Selection{
+				MaxHeight:     *height,
+				VideoCodec:    "h264",
+				AudioCodec:    "aac",
+				Container:     "mp4",
+				AllowSeparate: true,
+			}
+			plan, err := goyt.Plan(media, videoSel)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+
+			manifest, err = goyt.CreateVideoJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, videoSel, *decode)
+			if err != nil {
+				_ = os.RemoveAll(absJobDir)
+				return err
+			}
+		}
+
+		if err := manifest.Save(absJobDir); err != nil {
+			_ = os.RemoveAll(absJobDir)
+			return err
+		}
+
+		runnerOpts := goyt.JobRunnerOptions{
+			Extractor: func(ctx context.Context, u *url.URL) (*goyt.Media, error) {
+				return extractor.ExtractDownloadable(ctx, u)
+			},
+			Downloader: goyt.NewDownloader(nil),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: goyt.DownloadOptions{
+				Resume:       true,
+				MaxRetries:   2,
+				StallTimeout: *stallTimeout,
+			},
+			URLRefreshes: *urlRefreshes,
+			Stdout:       stdout,
+			Stderr:       stderr,
+		}
+
+		err = goyt.ExecuteJob(ctx, absJobDir, runnerOpts)
+		if err != nil {
+			if !errors.Is(err, goyt.ErrJobLocked) && !errors.Is(err, goyt.ErrInvalidManifest) && !errors.Is(err, goyt.ErrUnsupportedManifestVersion) {
+				fmt.Fprintf(stderr, "To resume this job, run:\n  goyt download -resume-job %s\n", *jobDir)
+			}
+			return err
+		}
+		return nil
+	}
+
 	var saved string
 	var expected *time.Duration
 	var resolvedSpec goyt.AudioOutputSpec
@@ -199,6 +458,33 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		Resume:       true,
 		MaxRetries:   2,
 		StallTimeout: *stallTimeout,
+		OnRetry: func(diag goyt.RetryDiagnostic) {
+			fmt.Fprintln(stderr)
+			if diag.Resumed {
+				fmt.Fprintf(
+					stderr,
+					"Recovery attempt %d/%d after error (%s): resuming from %.2f MiB (HTTP 206 validated).\n",
+					diag.Attempt,
+					diag.MaxRetries,
+					diag.Reason,
+					float64(diag.PriorOffset)/(1024*1024),
+				)
+			} else {
+				actionReason := diag.ActionReason
+				if actionReason == "" {
+					actionReason = "safe resumption not available"
+				}
+				fmt.Fprintf(
+					stderr,
+					"Recovery attempt %d/%d after error (%s): restarting from byte 0 (%s; discarded %.2f MiB partial data).\n",
+					diag.Attempt,
+					diag.MaxRetries,
+					diag.Reason,
+					actionReason,
+					float64(diag.PriorOffset)/(1024*1024),
+				)
+			}
+		},
 	}
 
 	refreshBudget := *urlRefreshes

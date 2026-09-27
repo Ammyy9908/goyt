@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -843,11 +845,15 @@ func TestInspectCLI_TextOutputPreserved(t *testing.T) {
 }
 
 func makeMockPlayerJSON(videoID, itag18URL string) string {
+	return makeMockPlayerWithDurationJSON(videoID, itag18URL, "120")
+}
+
+func makeMockPlayerWithDurationJSON(videoID, itag18URL, durationSeconds string) string {
 	return fmt.Sprintf(`{
 	"videoDetails": {
 		"videoId": %q,
 		"title": "Mock YouTube Video",
-		"lengthSeconds": "120"
+		"lengthSeconds": %q
 	},
 	"playabilityStatus": {
 		"status": "OK"
@@ -863,7 +869,7 @@ func makeMockPlayerJSON(videoID, itag18URL string) string {
 			}
 		]
 	}
-}`, videoID, itag18URL)
+}`, videoID, durationSeconds, itag18URL)
 }
 
 func TestDownloadCLI_403Refresh_Recovery(t *testing.T) {
@@ -1455,6 +1461,277 @@ func TestDownloadCLI_HLSCancellation_NoReExtraction(t *testing.T) {
 		}
 		if extractionCount.Load() != 1 {
 			t.Fatalf("expected 1 extraction before cancellation, got %d", extractionCount.Load())
+		}
+	})
+}
+
+func TestDownloadCLI_JobDir_FlagsValidation(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("job-dir and resume-job mutually exclusive", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-job-dir", filepath.Join(tempDir, "job1"),
+			"-resume-job", filepath.Join(tempDir, "job2"),
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error on mutually exclusive flags, got nil")
+		}
+		if !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("job-dir fails if directory already exists", func(t *testing.T) {
+		existingDir := filepath.Join(tempDir, "existing-job")
+		if err := os.MkdirAll(existingDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-job-dir", existingDir,
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error when job-dir already exists, got nil")
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("resume-job fails if directory not found", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-resume-job", filepath.Join(tempDir, "nonexistent-job"),
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error when resume-job not found, got nil")
+		}
+		if !errors.Is(err, goyt.ErrJobNotFound) && !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("resume-job rejects source and selection overrides", func(t *testing.T) {
+		jobDir := filepath.Join(tempDir, "sample-job")
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		tests := []struct {
+			flagName string
+			args     []string
+		}{
+			{"url", []string{"-url", "https://youtube.com/watch?v=123"}},
+			{"out", []string{"-out", "other.mp4"}},
+			{"height", []string{"-height", "720"}},
+			{"transport", []string{"-transport", "http"}},
+			{"decode-check", []string{"-decode-check"}},
+			{"audio-only", []string{"-audio-only"}},
+			{"audio-format", []string{"-audio-format", "mp3"}},
+			{"audio-quality", []string{"-audio-quality", "2"}},
+			{"audio-bitrate", []string{"-audio-bitrate", "128k"}},
+			{"audio-language", []string{"-audio-language", "en"}},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.flagName, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				args := append([]string{"download", "-resume-job", jobDir}, tc.args...)
+				err := Run(context.Background(), args, &stdout, &stderr)
+				if err == nil {
+					t.Fatalf("expected error overriding flag %s on resume-job, got nil", tc.flagName)
+				}
+				if !strings.Contains(err.Error(), "cannot be specified with -resume-job") {
+					t.Fatalf("unexpected error message: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("job-dir rejects hls transport", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "hls",
+			"-job-dir", filepath.Join(tempDir, "hls-job"),
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error when job-dir uses hls transport, got nil")
+		}
+		if !strings.Contains(err.Error(), "HTTP transport only") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+
+	t.Run("goyt hls rejects job-dir and resume-job", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"hls",
+			"-url", "https://manifest.test/playlist.m3u8",
+			"-job-dir", filepath.Join(tempDir, "hls-job-dir"),
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for job-dir in goyt hls, got nil")
+		}
+		if !strings.Contains(err.Error(), "not supported in goyt hls") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+
+		err = Run(context.Background(), []string{
+			"hls",
+			"-url", "https://manifest.test/playlist.m3u8",
+			"-resume-job", filepath.Join(tempDir, "hls-resume-job"),
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for resume-job in goyt hls, got nil")
+		}
+		if !strings.Contains(err.Error(), "not supported in goyt hls") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+}
+
+func TestDownloadCLI_PersistentJob_Lifecycle(t *testing.T) {
+	tempDir := t.TempDir()
+	jobDir := filepath.Join(tempDir, "cli-persistent-job")
+	outFile := filepath.Join(tempDir, "cli-output.mp4")
+	sourceMP4 := filepath.Join(tempDir, "source.mp4")
+
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=160x120:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	mockMediaData, err := os.ReadFile(sourceMP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mediaRequests atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerWithDurationJSON("abcdefghijk", "https://media.test/video.mp4", "1"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/video.mp4" {
+			count := mediaRequests.Add(1)
+			if count <= 3 {
+				// Abort on initial run requests (attempt 0, 1, 2)
+				return &http.Response{
+					StatusCode: http.StatusGatewayTimeout,
+					Status:     "504 Gateway Timeout",
+					Body:       io.NopCloser(strings.NewReader("timeout")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				ContentLength: int64(len(mockMediaData)),
+				Header: http.Header{
+					"Content-Type": []string{"video/mp4"},
+				},
+				Body:    io.NopCloser(bytes.NewReader(mockMediaData)),
+				Request: req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		// Run 1: Initial creation fails on media request
+		var stdout1, stderr1 bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-job-dir", jobDir,
+			"-out", outFile,
+		}, &stdout1, &stderr1)
+		if err == nil {
+			t.Fatal("expected error on run 1, got nil")
+		}
+
+		stderr1Str := stderr1.String()
+		if !strings.Contains(stderr1Str, "To resume this job, run:") || !strings.Contains(stderr1Str, "goyt download -resume-job") {
+			t.Fatalf("expected resume instructions in stderr, got: %s", stderr1Str)
+		}
+
+		// Verify job manifest was created
+		manifest, err := goyt.LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load saved job manifest: %v", err)
+		}
+		if manifest.SchemaVersion != 1 {
+			t.Fatalf("unexpected schema version: %d", manifest.SchemaVersion)
+		}
+		if manifest.VideoID != "abcdefghijk" {
+			t.Fatalf("unexpected video ID: %s", manifest.VideoID)
+		}
+
+		// Run 2: Resume with -resume-job succeeds
+		var stdout2, stderr2 bytes.Buffer
+		err = Run(context.Background(), []string{
+			"download",
+			"-resume-job", jobDir,
+		}, &stdout2, &stderr2)
+		if err != nil {
+			t.Fatalf("unexpected error resuming job: %v", err)
+		}
+
+		stdout2Str := stdout2.String()
+		if !strings.Contains(stdout2Str, "Saved and verified:") {
+			t.Fatalf("expected success message in stdout, got: %s", stdout2Str)
+		}
+
+		// Verify output file exists
+		data, err := os.ReadFile(outFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(data, mockMediaData) {
+			t.Fatal("saved output data does not match source media data")
+		}
+
+		// Run 3: Idempotent resume of completed job
+		initialReqs := mediaRequests.Load()
+		var stdout3, stderr3 bytes.Buffer
+		err = Run(context.Background(), []string{
+			"download",
+			"-resume-job", jobDir,
+		}, &stdout3, &stderr3)
+		if err != nil {
+			t.Fatalf("unexpected error on repeated resume: %v", err)
+		}
+		if mediaRequests.Load() != initialReqs {
+			t.Fatalf("expected 0 additional requests on completed job resume, got %d", mediaRequests.Load()-initialReqs)
+		}
+		if !strings.Contains(stdout3.String(), "Job already completed.") {
+			t.Fatalf("expected 'Job already completed.' notice, got: %s", stdout3.String())
 		}
 	})
 }

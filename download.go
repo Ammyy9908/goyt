@@ -29,6 +29,17 @@ type Progress struct {
 	TotalBytes      int64
 }
 
+// RetryDiagnostic describes a retry or restart decision during download.
+type RetryDiagnostic struct {
+	Attempt      int    // 1-based index of the retry attempt
+	MaxRetries   int    // Maximum configured retries
+	Reason       string // Sanitized error string from the failed attempt
+	PriorOffset  int64  // Bytes downloaded before the failure
+	TotalBytes   int64  // Total expected bytes (-1 if unknown)
+	Resumed      bool   // True if the attempt successfully resumed from PriorOffset
+	ActionReason string // Reason for restarting from 0 if Resumed is false
+}
+
 // DownloadOptions controls one direct HTTP download.
 type DownloadOptions struct {
 	// Resume enables resuming a matching partial download.
@@ -47,6 +58,11 @@ type DownloadOptions struct {
 	// OnProgress runs synchronously. Keep it fast.
 	// TotalBytes may be unknown. Progress can reset if a transfer restarts.
 	OnProgress func(Progress)
+
+	// OnRetry is called when a retry or restart attempt occurs.
+	// It is invoked after response headers and range validation determine
+	// whether the attempt resumed from an offset or restarted from byte 0.
+	OnRetry func(RetryDiagnostic)
 }
 
 // stallWatcher tracks request-scoped network inactivity.
@@ -212,6 +228,62 @@ func origin(u *url.URL) string {
 		strings.ToLower(u.Hostname()) + ":" + port
 }
 
+// SanitizeError returns a sanitized error description free of URLs, query parameters,
+// headers, authorization tokens, or sensitive endpoint information.
+func SanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Err != nil {
+			return fmt.Sprintf("%s: %s", urlErr.Op, SanitizeError(urlErr.Err))
+		}
+		return urlErr.Op
+	}
+
+	msg := err.Error()
+
+	// Strip URL schemes and query strings from error strings
+	for {
+		start := strings.Index(msg, "http://")
+		if start == -1 {
+			start = strings.Index(msg, "https://")
+		}
+		if start == -1 {
+			break
+		}
+		end := len(msg) - start
+		for i, r := range msg[start:] {
+			if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' || r == '<' || r == '>' {
+				end = i
+				break
+			}
+			if r == ':' && i > 8 && (i+1 == len(msg[start:]) || msg[start+i+1] == ' ') {
+				end = i
+				break
+			}
+		}
+		msg = msg[:start] + msg[start+end:]
+	}
+
+	if idx := strings.Index(msg, "?"); idx != -1 {
+		end := strings.IndexAny(msg[idx:], " \"'\n\r\t<>")
+		if end == -1 {
+			msg = msg[:idx]
+		} else {
+			msg = msg[:idx] + msg[idx+end:]
+		}
+	}
+
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "transient network error"
+	}
+	return msg
+}
+
 // Download streams a resource to destination.
 //
 // It creates destination.part and destination.part.json.
@@ -265,6 +337,9 @@ func (d *Downloader) Download(
 		delay = 30 * time.Second
 	}
 
+	var lastErr error
+	var priorOffset int64
+
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -274,11 +349,14 @@ func (d *Downloader) Download(
 			!resource.ExpiresAt.After(time.Now()) {
 			return nil, ErrResourceExpired
 		}
-		result, retry, err := d.attempt(
+		result, retry, currentDownloaded, err := d.attempt(
 			ctx,
 			resource,
 			destination,
 			options,
+			attempt,
+			lastErr,
+			priorOffset,
 		)
 
 		if err == nil {
@@ -292,6 +370,9 @@ func (d *Downloader) Download(
 		if !retry || attempt >= options.MaxRetries {
 			return nil, err
 		}
+
+		lastErr = err
+		priorOffset = currentDownloaded
 
 		timer := time.NewTimer(delay)
 
@@ -379,7 +460,10 @@ func (d *Downloader) attempt(
 	resource Resource,
 	destination string,
 	options DownloadOptions,
-) (*DownloadResult, bool, error) {
+	attempt int,
+	lastErr error,
+	priorOffset int64,
+) (*DownloadResult, bool, int64, error) {
 	partPath := destination + ".part"
 	statePath := partPath + ".json"
 	key := resourceKey(resource)
@@ -403,7 +487,7 @@ func (d *Downloader) attempt(
 		nil,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 
 	req.Header = resource.Headers.Clone()
@@ -424,19 +508,19 @@ func (d *Downloader) attempt(
 	resp, err := d.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return nil, false, 0, ctx.Err()
 		}
 		if watcher.IsStalled() {
-			return nil, true, fmt.Errorf("%w: %v", ErrDownloadStalled, err)
+			return nil, true, 0, fmt.Errorf("%w: %v", ErrDownloadStalled, err)
 		}
-		return nil, true, fmt.Errorf("goyt: request failed: %w", err)
+		return nil, true, 0, fmt.Errorf("goyt: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusRequestTimeout ||
 		resp.StatusCode == http.StatusTooManyRequests ||
 		resp.StatusCode >= 500 {
-		return nil, true, fmt.Errorf(
+		return nil, true, 0, fmt.Errorf(
 			"goyt: retryable HTTP status %d",
 			resp.StatusCode,
 		)
@@ -447,15 +531,15 @@ func (d *Downloader) attempt(
 		// Invalidate the old checkpoint. A retry will request the full file.
 		if err := os.Remove(statePath); err != nil &&
 			!errors.Is(err, os.ErrNotExist) {
-			return nil, false, err
+			return nil, false, 0, err
 		}
 
-		return nil, true, errors.New("goyt: server rejected resume range")
+		return nil, true, 0, errors.New("goyt: server rejected resume range (HTTP 416)")
 	}
 
 	if resp.StatusCode != http.StatusOK &&
 		resp.StatusCode != http.StatusPartialContent {
-		return nil, false, &HTTPStatusError{
+		return nil, false, 0, &HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
 		}
@@ -463,24 +547,46 @@ func (d *Downloader) attempt(
 
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" &&
 		!strings.EqualFold(encoding, "identity") {
-		return nil, false, errors.New(
+		return nil, false, 0, errors.New(
 			"goyt: encoded response cannot be downloaded as identity bytes",
 		)
 	}
 
 	total := resp.ContentLength
+	var resumed bool
+	var actionReason string
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// The server ignored Range or If-Range detected a changed file.
-		// Restart instead of appending a full response to a partial file.
+		if offset > 0 {
+			actionReason = "server responded with 200 OK instead of 206 Partial Content"
+		} else if priorOffset > 0 && attempt > 0 {
+			if !strongETag(previous.ETag) {
+				actionReason = "server did not provide a strong ETag for safe partial resume"
+			} else {
+				actionReason = "safe resumption not available"
+			}
+		}
 		offset = 0
 
 	case http.StatusPartialContent:
 		total, err = validateRange(resp, offset, previous)
 		if err != nil {
-			return nil, false, err
+			return nil, false, 0, err
 		}
+		resumed = true
+	}
+
+	if attempt > 0 && options.OnRetry != nil {
+		options.OnRetry(RetryDiagnostic{
+			Attempt:      attempt,
+			MaxRetries:   options.MaxRetries,
+			Reason:       SanitizeError(lastErr),
+			PriorOffset:  priorOffset,
+			TotalBytes:   total,
+			Resumed:      resumed,
+			ActionReason: actionReason,
+		})
 	}
 
 	flags := os.O_CREATE | os.O_WRONLY
@@ -492,7 +598,7 @@ func (d *Downloader) attempt(
 
 	file, err := os.OpenFile(partPath, flags, 0600)
 	if err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 	defer file.Close()
 
@@ -504,7 +610,7 @@ func (d *Downloader) attempt(
 
 	// A weak or absent ETag is saved but will not permit resumption.
 	if err := saveResume(statePath, state); err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 
 	report := func(written int64) {
@@ -519,13 +625,14 @@ func (d *Downloader) attempt(
 	report(0)
 
 	written, retry, err := copyDownload(ctx, file, resp.Body, watcher, report)
+	currentDownloaded := offset + written
 	if err != nil {
-		return nil, retry, err
+		return nil, retry, currentDownloaded, err
 	}
 
 	size := offset + written
 	if total >= 0 && size != total {
-		return nil, true, fmt.Errorf(
+		return nil, true, size, fmt.Errorf(
 			"goyt: incomplete transfer: got %d bytes, expected %d",
 			size,
 			total,
@@ -533,19 +640,19 @@ func (d *Downloader) attempt(
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, false, err
+		return nil, false, size, err
 	}
 
 	if err := file.Sync(); err != nil {
-		return nil, false, err
+		return nil, false, size, err
 	}
 
 	if err := file.Close(); err != nil {
-		return nil, false, err
+		return nil, false, size, err
 	}
 
 	if err := os.Rename(partPath, destination); err != nil {
-		return nil, false, err
+		return nil, false, size, err
 	}
 
 	// The completed file is already committed; checkpoint cleanup is best effort.
@@ -554,7 +661,7 @@ func (d *Downloader) attempt(
 	return &DownloadResult{
 		Path:      filepath.Clean(destination),
 		SizeBytes: size,
-	}, false, nil
+	}, false, size, nil
 }
 
 func validateRange(

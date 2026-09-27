@@ -83,20 +83,31 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 
 # Download with CLI overall timeout disabled (only parent context applies)
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -timeout 0
+
+# Start a new persistent download job in ./my-job (HTTP only)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -job-dir ./my-job -out video.mp4
+
+# Resume an interrupted persistent download job
+./bin/goyt download -resume-job ./my-job
+
+# Resume an interrupted job with operational overrides
+./bin/goyt download -resume-job ./my-job -timeout 1h -stall-timeout 30s -url-refreshes 2
 ```
 
 **Flags:**
-- `-url`: YouTube video URL (required).
-- `-transport`: Download transport protocol: `http` or `hls` (default `http`).
+- `-url`: YouTube video URL (required for new jobs; rejected with `-resume-job`).
+- `-transport`: Download transport protocol: `http` or `hls` (default `http`). Persistent jobs require `http`.
+- `-job-dir`: Path to create a new persistent download job directory. Fails if the directory already exists.
+- `-resume-job`: Path to an existing persistent download job directory to resume. Source, selection, audio, and output flags are loaded from the job manifest and cannot be overridden.
 - `-audio-only`: Download audio without video. Defaults output format to `best` and output filename to `audio.<resolved_ext>` when `-out` is omitted.
 - `-audio-format`: Output format for audio-only mode (default `best`). Supported formats: `best`, `aac`, `alac`, `flac`, `m4a`, `mp3`, `opus`, `vorbis`, `wav`. Only valid with `-audio-only`.
 - `-audio-quality`: MP3 VBR quality level, integer `0` (highest quality, ~245 kbps) to `9` (lowest quality, ~65 kbps), default `2` (~190 kbps). Lower values request higher quality. Only valid for `mp3` format with `-audio-only`. Mutually exclusive with `-audio-bitrate`.
 - `-audio-bitrate`: Target audio bitrate for lossy encoders (e.g. `128k`, `192k`, `320k`). Supported for `aac`, `m4a`, `mp3`, `opus`, and `vorbis`. Disallowed for `best`, `alac`, `flac`, and `wav`. Mutually exclusive with `-audio-quality`.
 - `-height`: Maximum desired video height in pixels (default `1080`). Disallowed when explicitly specified in `-audio-only` mode.
 - `-audio-language`: Audio language tag, e.g. `en` or `en-US` (supports HLS and HTTP formats with language metadata).
-- `-timeout`: Overall job timeout covering extraction, downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline.
+- `-timeout`: Overall job timeout covering extraction, downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline. Resumed jobs receive a fresh deadline.
 - `-stall-timeout`: Network inactivity timeout per media request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
-- `-url-refreshes`: Maximum URL re-extraction attempts across the entire job on expired or forbidden media (default `1`, `0` disables). Negative values are rejected before network access or file creation.
+- `-url-refreshes`: Maximum URL re-extraction attempts across the entire job on expired or forbidden media (default `1`, `0` disables). Resumed jobs receive a fresh refresh budget.
 - `-out`: Destination file path. In video mode, must have an `.mp4` extension (default `video.mp4`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
 - `-version`: Print `goyt` version.
@@ -378,6 +389,40 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Preexisting destination files remain untouched until all downloads, processing, metadata verification, and optional decode checks succeed.
   - Failed attempt directories are retained under the standard work-directory policy and logged to standard error.
 
+### Persistent Download Jobs & Resume (`-job-dir` / `-resume-job`)
+
+`goyt` supports durable, multi-stream persistent download jobs for direct HTTP video and audio-only downloads that survive process restarts and network interruptions:
+
+- **Creating a Job (`-job-dir DIR`)**:
+  - Requires direct HTTP transport (`-transport http`). HLS persistent jobs are rejected before creating job state.
+  - Fails immediately if the directory `DIR` already exists, ensuring existing jobs and directories are never overwritten.
+  - Resolves and records the absolute destination path in a versioned job manifest (`schema_version: 1`).
+  - Writes manifests atomically via temporary file and rename (`0600` file permissions on supported systems).
+  - Holds an OS-backed exclusive file lock (`flock` on Unix, `LockFileEx` on Windows) on `job.lock` for the entire process invocation. If another process attempts to open the same job, it fails immediately with `ErrJobLocked`. Locks automatically release on process exit or abnormal crash without relying on stale PID files.
+- **Resuming a Job (`-resume-job DIR`)**:
+  - Restores the YouTube source URL, video ID, format selection constraints, audio settings, decode check preference, and absolute destination path directly from the manifest.
+  - Explicit specification of source, selection, audio, or output flags (`-url`, `-out`, `-height`, `-transport`, `-decode-check`, `-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`, `-audio-language`) is rejected rather than silently overriding stored job parameters.
+  - Operational parameters (`-timeout`, `-stall-timeout`, `-url-refreshes`) may be overridden on resume; otherwise, stored operational defaults apply.
+  - Each resumed invocation receives a fresh overall deadline and fresh URL refresh budget.
+  - On cancellation (e.g. Ctrl+C), execution halts promptly while retaining resumable partial and completed stream state.
+- **Completed Stream Reuse & Integrity Checks**:
+  - Checkpointed streams marked complete are verified against their recorded SHA-256 integrity hash and byte size.
+  - If all input streams are already complete and verified, merging/conversion and verification proceed entirely offline without requiring network extraction.
+  - If a completed file's size or SHA-256 mismatches the manifest, it is safely re-downloaded from scratch.
+- **Incomplete Stream Resume & Refresh**:
+  - When incomplete streams exist, `goyt` re-extracts fresh media URLs using the canonical video ID.
+  - Pinned format matching (`MatchRefreshedFormat`) ensures only the exact originally selected representation (itag, container, codecs, dimensions, audio track ID, language, original/default markers) is matched. Best-format heuristics are never re-run.
+  - Safe same-resource strong-ETag and byte-range resumes continue where possible. If a refreshed URL cannot safely resume the partial file, the incomplete stream restarts cleanly from byte 0.
+- **Execution Stages & Crash Recovery**:
+  - Stages tracked in manifest: `planned`, `downloading`, `processing`, `verifying`, `ready_to_commit`, and `completed`.
+  - Incomplete processing outputs are discarded and re-processed safely.
+  - Output staging files are generated on the destination filesystem (or copied via temporary destination files) to prevent cross-device rename failures.
+  - Pre-commit identity (final SHA-256 and byte size) is recorded before committing. If a crash occurs during destination rename, subsequent resume recognizes the committed output and completes cleanly.
+  - Once committed to the destination, intermediate input and partial files inside the job directory are deleted to free disk space, while retaining a lightweight completed manifest.
+  - Resuming a completed job verifies the final destination output identity (SHA-256 and size) and reports success without network requests. If the destination file was deleted or altered, resume returns a clear error (`ErrCompletedOutputMismatch`).
+- **Security & Untrusted State**:
+  - Manifest files and internal relative paths are validated against directory traversal, absolute paths, and symlinks. State is treated as untrusted input.
+
 ## Development Checks
 
 ```sh
@@ -387,11 +432,11 @@ go test -race ./...
 go build ./...
 ```
 
-Run the local FFmpeg and executor integration tests (including MP3 audio conversions):
+Run the local FFmpeg, executor, and persistent job integration tests:
 
 ```sh
 go test -race -tags=integration \
-  -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration)$' \
+  -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestJobIntegration)$' \
   -count=1 -v ./...
 ```
 
@@ -416,16 +461,22 @@ separate from automated PASS results.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.
-- No automatic transport switching between HTTP and HLS, client fallback, quality fallback, or whole-job resume across process restarts. Arbitrary-URL `goyt hls` does not support YouTube re-extraction.
+- No automatic transport switching between HTTP and HLS, client fallback, or quality fallback. Arbitrary-URL `goyt hls` does not support YouTube re-extraction.
+- Persistent jobs (`-job-dir` / `-resume-job`) are supported for direct HTTP video and audio-only downloads. Persistent HLS jobs and automatic discovery of old temporary directories are not implemented in this phase.
+- Concurrency on persistent jobs is strictly single-process; concurrent invocations on the same job directory fail fast via OS-backed locking.
+- If a completed persistent job's destination file is deleted or modified, resuming it will fail with `ErrCompletedOutputMismatch` and requires creating a new job.
 - HLS support excludes encryption, fragmented MP4 initialization sections,
   byte-range segments, discontinuities, nested master playlists, and alternate
   video renditions.
 - Subtitle references may be ignored for audio/video downloads; subtitle
   downloading and muxing are not implemented.
 - Individual HTTP transfers can resume matching partial files when the server
-  provides a strong ETag and valid byte-range responses. Otherwise, transfers
-  restart.
-- Stalled-transfer recovery and HTTP range resumes operate within a single job execution up to the retry limit; failed jobs retain intermediate work directories for troubleshooting but cannot automatically resume as whole jobs across CLI restarts without restarting the command.
+  provides a strong ETag and valid byte-range responses. An interrupted HTTP
+  transfer may restart the affected stream from zero when safe byte-range
+  resumption cannot be established, such as when a strong ETag is unavailable
+  or the server ignores the range request. This can increase download time and
+  bandwidth usage. Recovery diagnostics report whether a transfer resumes or restarts.
+- Nonpersistent downloads retain temporary attempt directories on failure for manual inspection without whole-job resume.
 - Full decoding checks decodability, not perceptual audio/video synchronization.
 
 ---
