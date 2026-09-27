@@ -141,6 +141,7 @@ Downloads arbitrary HLS master or media playlists directly from a URL:
 ## Supported Scope
 
 - Selected public, non-live YouTube videos accessible without authentication.
+- Individual track URLs on `music.youtube.com` (`https://music.youtube.com/watch?v=VIDEO_ID`) for both video and audio downloads and stream inspection; album and playlist URLs remain unsupported.
 - Explicit selection of direct HTTP or HLS downloading.
 - H.264 video and AAC audio output in MP4 through the main YouTube CLI (video mode).
 - Multi-format audio-only downloads across 9 formats (audio-only mode).

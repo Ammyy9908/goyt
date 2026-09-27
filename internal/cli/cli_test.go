@@ -152,6 +152,16 @@ func TestDownloadFlagValidation(t *testing.T) {
 			args:    []string{"download", "-url", "https://example.com/video"},
 			wantErr: "unsupported YouTube URL",
 		},
+		{
+			name:    "unsupported music playlist url",
+			args:    []string{"download", "-url", "https://music.youtube.com/playlist?list=PL1234567890"},
+			wantErr: "unsupported YouTube URL",
+		},
+		{
+			name:    "unsupported lookalike music host",
+			args:    []string{"download", "-url", "https://music.youtube.com.example.org/watch?v=12345678901"},
+			wantErr: "unsupported YouTube URL",
+		},
 	}
 
 	for _, tc := range tests {
@@ -192,6 +202,11 @@ func TestInspectFlagValidation(t *testing.T) {
 		{
 			name:    "unsupported youtube url",
 			args:    []string{"inspect", "-url", "https://example.com/video"},
+			wantErr: "unsupported YouTube video URL",
+		},
+		{
+			name:    "unsupported music playlist url in inspect",
+			args:    []string{"inspect", "-url", "https://music.youtube.com/playlist?list=PL1234567890"},
 			wantErr: "unsupported YouTube video URL",
 		},
 	}

@@ -20,6 +20,7 @@
 - YouTube inspection, generic HLS downloading, and compatibility-test tools.
 - Unified multi-subcommand CLI (`goyt download`, `goyt inspect`, `goyt hls`) with independent help.
 - Backward-compatible legacy flag shorthand (`goyt -url URL ...`).
+- Support for individual YouTube Music track URLs (`https://music.youtube.com/watch?v=VIDEO_ID`) in `goyt download` and `goyt inspect`, extracting the canonical video ID while ignoring extraneous query/tracking parameters (`si`, `list`, etc.).
 - Multi-format audio-only download support in `goyt download` (`-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`).
 - Support for 9 output formats: `best`, `aac`, `alac`, `flac`, `m4a`, `mp3`, `opus`, `vorbis`, and `wav`.
 - Centralized `AudioOutputSpec` defining requested format, resolved codec, container/muxer, extension, copy/encode decision, and validated encoder settings.
@@ -47,6 +48,7 @@
 ### Known Limitations
 
 - YouTube support covers a subset of public, non-live videos.
+- YouTube Music support is limited to individual track watch URLs; albums, playlists, and browse endpoints on `music.youtube.com` are unsupported.
 - No authenticated, DRM-protected, DASH, or SABR downloading.
 - No JavaScript challenge solver or PO-token provider.
 - No automatic transport fallback or expired-URL refresh.

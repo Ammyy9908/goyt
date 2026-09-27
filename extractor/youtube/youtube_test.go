@@ -11,6 +11,14 @@ func TestVideoID(t *testing.T) {
 		"https://www.youtube.com/watch?v=abcdefghijk",
 		"https://youtu.be/abcdefghijk",
 		"https://www.youtube.com/shorts/abcdefghijk",
+		"https://music.youtube.com/watch?v=abcdefghijk",
+		"http://music.youtube.com/watch?v=abcdefghijk",
+		"https://MUSIC.YOUTUBE.COM/watch?v=abcdefghijk",
+		"https://music.youtube.com/watch?v=abcdefghijk&si=tracking123",
+		"https://music.youtube.com/watch?si=tracking123&v=abcdefghijk&feature=share",
+		"https://music.youtube.com/watch?v=abcdefghijk&list=RDAMVMabcdefghijk",
+		"https://music.youtube.com/watch?list=RDAMVMabcdefghijk&v=abcdefghijk",
+		"https://www.youtube.com/watch?v=abcdefghijk&list=PL123456789",
 	} {
 		u, err := url.Parse(input)
 		if err != nil {
@@ -23,12 +31,34 @@ func TestVideoID(t *testing.T) {
 		}
 	}
 
-	u, _ := url.Parse(
+	invalidURLs := []string{
 		"https://youtube.com.evil.test/watch?v=abcdefghijk",
-	)
+		"https://music.youtube.com.example.org/watch?v=abcdefghijk",
+		"https://fakemusic.youtube.com/watch?v=abcdefghijk",
+		"https://music.youtube.com.evil.test/watch?v=abcdefghijk",
+		"https://notmusic.youtube.com/watch?v=abcdefghijk",
+		"https://user:pass@music.youtube.com/watch?v=abcdefghijk",
+		"ftp://music.youtube.com/watch?v=abcdefghijk",
+		"https://music.youtube.com/watch?v=short",
+		"https://music.youtube.com/watch?v=toolongvideoidentifier123",
+		"https://music.youtube.com/watch?v=invalid!char",
+		"https://music.youtube.com/watch?v=",
+		"https://music.youtube.com/watch",
+		"https://music.youtube.com/playlist?list=PL1234567890",
+		"https://music.youtube.com/album/MPREb_123456789",
+		"https://music.youtube.com/browse/VLPL123456789",
+		"https://music.youtube.com/channel/UC1234567890",
+		"https://www.youtube.com/playlist?list=PL1234567890",
+	}
 
-	if _, err := videoID(u); err == nil {
-		t.Fatal("unrelated host accepted")
+	for _, raw := range invalidURLs {
+		u, err := url.Parse(raw)
+		if err != nil {
+			continue
+		}
+		if id, err := videoID(u); err == nil {
+			t.Fatalf("expected error for invalid URL %q, got id %q", raw, id)
+		}
 	}
 }
 

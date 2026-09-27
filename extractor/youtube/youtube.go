@@ -201,6 +201,11 @@ func videoID(u *url.URL) (string, error) {
 			}
 		}
 
+	case "music.youtube.com":
+		if u.Path == "/watch" {
+			id = u.Query().Get("v")
+		}
+
 	default:
 		return "", errors.New("youtube: unsupported host")
 	}
