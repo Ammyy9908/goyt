@@ -29,10 +29,15 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		false,
 		"emit machine-readable JSON output",
 	)
+	jsRuntimeFlag := flags.String(
+		"js-runtime",
+		"none",
+		"JavaScript runtime for solving player cipher/n challenges: none, node, deno, bun, qjs, auto, or /path/to/binary",
+	)
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt inspect -url YOUTUBE_URL [options]
-  goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-json]
+  goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-json]
   goyt inspect -help`)
 		flags.PrintDefaults()
 	}
@@ -43,7 +48,7 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 
 	if *source == "" || flags.NArg() != 0 {
 		flags.Usage()
-		return errors.New("usage: goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-json]")
+		return errors.New("usage: goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-json]")
 	}
 
 	normClient, err := youtube.ValidateInspectClient(*clientName)
@@ -56,7 +61,16 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return errors.New("invalid URL")
 	}
 
-	extractor := youtube.New(nil)
+	solver, err := createChallengeSolver(*jsRuntimeFlag)
+	if err != nil {
+		return err
+	}
+	var extractorOpts []youtube.Option
+	if solver != nil {
+		extractorOpts = append(extractorOpts, youtube.WithChallengeSolver(solver))
+	}
+
+	extractor := youtube.New(nil, extractorOpts...)
 	if !extractor.Match(u) {
 		return errors.New("unsupported YouTube video URL")
 	}

@@ -37,6 +37,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	audioFormat := flags.String("audio-format", "best", "output format for audio-only mode: best, aac, alac, flac, m4a, mp3, opus, vorbis, wav (default best)")
 	audioQuality := flags.Int("audio-quality", 2, "MP3 VBR quality: 0 (highest) to 9 (lowest), default 2")
 	audioBitrate := flags.String("audio-bitrate", "", "target audio bitrate for lossy encoders, e.g. 128k, 192k")
+	jsRuntimeFlag := flags.String(
+		"js-runtime",
+		"none",
+		"JavaScript runtime for solving player cipher/n challenges: none, node, deno, bun, qjs, auto, or /path/to/binary",
+	)
 	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
 	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 	urlRefreshes := flags.Int("url-refreshes", 1, "maximum URL re-extractions on expired or forbidden media (0 disables)")
@@ -46,9 +51,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-client visionos|web] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
-  goyt download -url URL -audio-only [-client visionos|web] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
-  goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
+  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
+  goyt download -url URL -audio-only [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -resume-job DIR [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
 		flags.PrintDefaults()
 	}
@@ -197,7 +202,15 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if err != nil {
 			return err
 		}
-		extractor := youtube.New(nil)
+		solver, err := createChallengeSolver(*jsRuntimeFlag)
+		if err != nil {
+			return err
+		}
+		var extractorOpts []youtube.Option
+		if solver != nil {
+			extractorOpts = append(extractorOpts, youtube.WithChallengeSolver(solver))
+		}
+		extractor := youtube.New(nil, extractorOpts...)
 
 		runnerOpts := goyt.JobRunnerOptions{
 			ClientValidator: func(c string) error {
@@ -382,7 +395,16 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return err
 	}
 
-	extractor := youtube.New(nil)
+	solver, err := createChallengeSolver(*jsRuntimeFlag)
+	if err != nil {
+		return err
+	}
+	var extractorOpts []youtube.Option
+	if solver != nil {
+		extractorOpts = append(extractorOpts, youtube.WithChallengeSolver(solver))
+	}
+
+	extractor := youtube.New(nil, extractorOpts...)
 	if !extractor.Match(u) {
 		return errors.New("unsupported YouTube URL")
 	}
@@ -544,25 +566,26 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		} else {
 			if *audioOnly {
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-				media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
+				res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
 
-				initialMedia = media
-				fmt.Fprintln(stdout, "Title:", media.Title)
+				initialMedia = res.Media
+				fmt.Fprintln(stdout, "Title:", res.Media.Title)
 				audioSel := goyt.AudioSelection{
 					AudioLanguage: *audioLanguage,
 					AudioFormat:   *audioFormat,
 					AudioQuality:  qualPtr,
 					AudioBitrate:  *audioBitrate,
 				}
-				plan, err := goyt.PlanAudio(media, audioSel)
+				plan, err := goyt.PlanAudio(res.Media, audioSel)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				printResultFormatDiagnostics(stderr, res, plan.Stream.ID, plan.Stream.AudioTrackID)
 
 				if !outSet {
 					targetPath = filepath.Join(filepath.Dir(targetPath), "audio"+plan.OutputSpec.Extension)
@@ -581,7 +604,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					}
 				}
 
-				manifest, err = goyt.CreateAudioJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, audioSel, *decode)
+				manifest, err = goyt.CreateAudioJob(*source, res.Media.ID, res.Media.Title, res.Media.Duration, targetPath, plan, audioSel, *decode)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -589,27 +612,30 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				manifest.Client = selectedClient
 			} else {
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
-				media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
+				res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
 
-				initialMedia = media
-				fmt.Fprintln(stdout, "Title:", media.Title)
+				initialMedia = res.Media
+				fmt.Fprintln(stdout, "Title:", res.Media.Title)
 				videoSel := goyt.Selection{
 					MaxHeight:     *height,
 					VideoCodec:    *videoCodec,
 					Container:     *container,
 					AllowSeparate: true,
 				}
-				plan, err := goyt.Plan(media, videoSel)
+				plan, err := goyt.Plan(res.Media, videoSel)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
 				}
+				for _, s := range plan.Streams {
+					printResultFormatDiagnostics(stderr, res, s.ID, s.AudioTrackID)
+				}
 
-				manifest, err = goyt.CreateVideoJob(*source, media.ID, media.Title, media.Duration, targetPath, plan, videoSel, *decode)
+				manifest, err = goyt.CreateVideoJob(*source, res.Media.ID, res.Media.Title, res.Media.Duration, targetPath, plan, videoSel, *decode)
 				if err != nil {
 					_ = os.RemoveAll(absJobDir)
 					return err
@@ -716,10 +742,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		case "http":
 			fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 
-			media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
+			res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 			if err != nil {
 				return err
 			}
+			media := res.Media
 
 			fmt.Fprintln(stdout, "Title:", media.Title)
 			expected = media.Duration
@@ -734,6 +761,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			if err != nil {
 				return err
 			}
+			printResultFormatDiagnostics(stderr, res, plan.Stream.ID, plan.Stream.AudioTrackID)
+
 			resolvedSpec = plan.OutputSpec
 			originalStream := plan.Stream
 
@@ -1152,10 +1181,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	case "http":
 		fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 
-		media, err := extractor.ExtractDownloadableWithClient(ctx, u, selectedClient)
+		res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 		if err != nil {
 			return err
 		}
+		media := res.Media
 
 		fmt.Fprintln(stdout, "Title:", media.Title)
 		expected = media.Duration
@@ -1169,6 +1199,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		})
 		if err != nil {
 			return err
+		}
+		for _, s := range plan.Streams {
+			printResultFormatDiagnostics(stderr, res, s.ID, s.AudioTrackID)
 		}
 
 		originalStreams := append([]goyt.Format(nil), plan.Streams...)
@@ -1551,4 +1584,25 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	fmt.Fprintln(stdout, "Saved and verified:", targetPath)
 	return nil
+}
+
+func printResultFormatDiagnostics(stderr io.Writer, res *youtube.DownloadableResult, formatID string, audioTrackID ...string) {
+	if res == nil || stderr == nil {
+		return
+	}
+	diag, _ := res.FormatDiagnostics(formatID, audioTrackID...)
+	fmt.Fprintln(stderr, diag.String())
+}
+
+func printSelectedFormatDiagnostics(stderr io.Writer, extractor *youtube.Extractor, formatIDs ...string) {
+	if extractor == nil || stderr == nil {
+		return
+	}
+	for _, fid := range formatIDs {
+		if diag, ok := extractor.FormatDiagnostics(fid); ok {
+			fmt.Fprintln(stderr, diag.String())
+		} else {
+			fmt.Fprintln(stderr, diag.String())
+		}
+	}
 }

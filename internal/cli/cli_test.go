@@ -2117,3 +2117,259 @@ func TestDownloadCLI_OracleBotCheck_SafeDiagnostics(t *testing.T) {
 		}
 	})
 }
+
+func TestJSRuntimeFlagValidation(t *testing.T) {
+	t.Run("download rejects nonexistent runtime", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			"-js-runtime", "nonexistent_js_binary_xyz",
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for nonexistent runtime, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent_js_binary_xyz") && !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("expected actionable error message, got: %v", err)
+		}
+	})
+
+	t.Run("inspect rejects nonexistent runtime", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"inspect",
+			"-url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+			"-js-runtime", "nonexistent_js_binary_xyz",
+		}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error for nonexistent runtime, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent_js_binary_xyz") && !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("expected actionable error message, got: %v", err)
+		}
+	})
+
+	t.Run("download help includes js-runtime", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		_ = Run(context.Background(), []string{"download", "-help"}, &stdout, &stderr)
+		out := stdout.String() + stderr.String()
+		if !strings.Contains(out, "-js-runtime") {
+			t.Fatalf("expected -js-runtime in download help, got: %s", out)
+		}
+	})
+
+	t.Run("inspect help includes js-runtime", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		_ = Run(context.Background(), []string{"inspect", "-help"}, &stdout, &stderr)
+		out := stdout.String() + stderr.String()
+		if !strings.Contains(out, "-js-runtime") {
+			t.Fatalf("expected -js-runtime in inspect help, got: %s", out)
+		}
+	})
+}
+
+func TestDownloadCLI_SelectedFormatDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	outFile := filepath.Join(tempDir, "diag-test.mp4")
+	sourceMP4 := filepath.Join(tempDir, "source-diag.mp4")
+
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	mockMediaData, err := os.ReadFile(sourceMP4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watchHTML := `<html><script>var ytInitialPlayerResponse = {
+		"videoDetails": {"videoId": "diagtest123", "title": "Diagnostic Test Video", "lengthSeconds": "1"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"formats": [{
+				"itag": 18,
+				"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+				"url": "https://media.test/video.mp4?expire=2000000000",
+				"width": 640,
+				"height": 360
+			}]
+		}
+	};</script></html>`
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(watchHTML)),
+				Request:    req,
+			}, nil
+		}
+		if req.URL.Host == "media.test" {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				ContentLength: int64(len(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=diagtest123",
+			"-client", "web",
+			"-height", "360",
+			"-out", outFile,
+		}, &stdout, &stderr)
+		if err != nil {
+			t.Fatalf("unexpected download error: %v", err)
+		}
+
+		stderrStr := stderr.String()
+		stdoutStr := stdout.String()
+
+		// Verify stderr contains sanitized format diagnostics
+		expectedDiag := "Format 18: signature=not_required, n=not_required"
+		if !strings.Contains(stderrStr, expectedDiag) {
+			t.Fatalf("expected stderr to contain %q, got:\n%s", expectedDiag, stderrStr)
+		}
+
+		// Verify stdout does NOT contain solver diagnostics
+		if strings.Contains(stdoutStr, "signature=") || strings.Contains(stdoutStr, "Format 18: signature=") {
+			t.Fatalf("stdout polluted with format diagnostics:\n%s", stdoutStr)
+		}
+
+		// Verify no sensitive tokens leak in stdout or stderr
+		for _, out := range []string{stdoutStr, stderrStr} {
+			if strings.Contains(out, "ytInitialPlayerResponse") || strings.Contains(out, "media.test") {
+				t.Fatalf("output leaked sensitive info:\n%s", out)
+			}
+		}
+	})
+}
+
+func TestDownloadCLI_MultiTrackAudioDiagnostics(t *testing.T) {
+	tempDir := t.TempDir()
+	outFile := filepath.Join(tempDir, "audio-multi.m4a")
+	jobDir := filepath.Join(tempDir, "audio-multi-job")
+	sourceM4A := filepath.Join(tempDir, "source-multi.m4a")
+
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:a", "aac", sourceM4A)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	mockMediaData, err := os.ReadFile(sourceM4A)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	watchHTML := `<html><script>var ytInitialPlayerResponse = {
+		"videoDetails": {"videoId": "multitrack1", "title": "Multi-Track Audio Video", "lengthSeconds": "1"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"url": "https://media.test/a_en.m4a?expire=2000000000",
+					"audioChannels": 2,
+					"audioTrack": {
+						"id": "en.4",
+						"displayName": "English (original)",
+						"audioIsDefault": true
+					}
+				},
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"url": "https://media.test/a_es.m4a?expire=2000000000",
+					"audioChannels": 2,
+					"audioTrack": {
+						"id": "es.4",
+						"displayName": "Spanish",
+						"audioIsDefault": false
+					}
+				}
+			]
+		}
+	};</script></html>`
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(watchHTML)),
+				Request:    req,
+			}, nil
+		}
+		if req.URL.Host == "media.test" {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"audio/mp4"}},
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				ContentLength: int64(len(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=multitrack1",
+			"-audio-only",
+			"-audio-format", "best",
+			"-client", "web",
+			"-job-dir", jobDir,
+			"-out", outFile,
+		}, &stdout, &stderr)
+		if err != nil {
+			t.Fatalf("unexpected download error: %v", err)
+		}
+
+		stderrStr := stderr.String()
+
+		// Verify stderr contains track-specific diagnostic attribution
+		expectedDiag := "Format 140 (en.4): signature=not_required, n=not_required"
+		if !strings.Contains(stderrStr, expectedDiag) {
+			t.Fatalf("expected stderr to contain %q, got:\n%s", expectedDiag, stderrStr)
+		}
+
+		// Verify manifest audio track information
+		loadedManifest, err := goyt.LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatalf("failed to load manifest: %v", err)
+		}
+		if len(loadedManifest.Streams) == 0 || loadedManifest.Streams[0].Format.AudioTrackID != "en.4" || loadedManifest.Streams[0].Format.AudioTrackName != "English (original)" {
+			t.Fatalf("expected manifest audio track en.4 English (original), got streams: %+v", loadedManifest.Streams)
+		}
+
+		// Verify manifest does NOT persist transient diagnostics
+		manifestBytes, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+		if err != nil {
+			t.Fatalf("failed to read manifest: %v", err)
+		}
+		manifestStr := string(manifestBytes)
+		for _, transientTerm := range []string{"signature=", "not_required", "resolved(", "unresolved"} {
+			if strings.Contains(manifestStr, transientTerm) {
+				t.Fatalf("job manifest persisted transient diagnostic term %q:\n%s", transientTerm, manifestStr)
+			}
+		}
+	})
+}

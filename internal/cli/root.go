@@ -49,10 +49,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
-  goyt download -url URL [-client visionos|web] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.mp4] [-decode-check]
-  goyt download -url URL -audio-only [-client visionos|web] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
-  goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
-  goyt inspect -url URL [-client web|visionos|all] [-json]
+  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.mp4] [-decode-check]
+  goyt download -url URL -audio-only [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -resume-job DIR [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
+  goyt inspect -url URL [-client web|visionos|all] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-json]
   goyt hls -url PLAYLIST_URL [-height 1080] [-timeout 30m] [-stall-timeout 60s] [-out hls.mp4]
   goyt -version
   goyt -help

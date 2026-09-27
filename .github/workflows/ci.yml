@@ -31,6 +31,11 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Set up Node.js for JavaScript challenge solver
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install FFmpeg and verify required media encoders
         shell: bash
         run: |
@@ -67,15 +72,16 @@ jobs:
         run: go vet ./...
 
       - name: Unit tests with race detector
+        env:
+          GOYT_REQUIRE_JS_RUNTIME: "true"
         run: go test -race -count=1 -timeout=5m ./...
 
       - name: Local integration tests
         env:
           GOYT_REQUIRE_ALL_ENCODERS: "true"
+          GOYT_REQUIRE_JS_RUNTIME: "true"
         run: |
-          go test -race -tags=integration \
-            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestVideoExecutorIntegration_AllCombinations|TestHLSVideoIntegration_MKV|TestDecodeFailurePreservesExistingDestination|TestJobIntegration|TestHLSJobIntegration)$' \
-            -count=1 -timeout=5m -v ./...
+          go test -race -tags=integration -count=1 -timeout=5m -v ./...
 
       - name: Build commands
         run: |

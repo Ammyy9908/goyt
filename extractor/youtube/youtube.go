@@ -53,9 +53,10 @@ func WithHTTPClient(client *http.Client) Option {
 }
 
 type Extractor struct {
-	mu     sync.RWMutex
-	client *http.Client
-	solver ChallengeSolver
+	mu          sync.RWMutex
+	client      *http.Client
+	solver      ChallengeSolver
+	diagnostics map[string]FormatDiagnostics
 }
 
 var _ goyt.Extractor = (*Extractor)(nil)
@@ -86,6 +87,60 @@ func (e *Extractor) SetSolver(solver ChallengeSolver) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.solver = solver
+}
+
+// FormatDiagnostics returns the challenge resolution diagnostics for a specific format ID from the latest extraction.
+// If the format was not challenged or is unknown, it returns a default unchallenged diagnostic record.
+func (e *Extractor) FormatDiagnostics(formatID string, audioTrackID ...string) (FormatDiagnostics, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.diagnostics == nil {
+		return FormatDiagnostics{
+			FormatID:  formatID,
+			Signature: ChallengeStatus{Source: ResolutionNotRequired},
+			NParam:    ChallengeStatus{Source: ResolutionNotRequired},
+		}, false
+	}
+	trackID := ""
+	if len(audioTrackID) > 0 {
+		trackID = audioTrackID[0]
+	}
+	if trackID != "" {
+		if d, ok := e.diagnostics[FormatDiagnosticKey(formatID, trackID)]; ok {
+			return d, true
+		}
+	}
+	if d, ok := e.diagnostics[formatID]; ok {
+		return d, true
+	}
+	for _, d := range e.diagnostics {
+		if d.FormatID == formatID {
+			return d, true
+		}
+	}
+	return FormatDiagnostics{
+		FormatID:     formatID,
+		AudioTrackID: trackID,
+		Signature:    ChallengeStatus{Source: ResolutionNotRequired},
+		NParam:       ChallengeStatus{Source: ResolutionNotRequired},
+	}, false
+}
+
+// AllFormatDiagnostics returns a copy of all format challenge diagnostics from the latest extraction.
+func (e *Extractor) AllFormatDiagnostics() map[string]FormatDiagnostics {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	res := make(map[string]FormatDiagnostics, len(e.diagnostics))
+	for k, v := range e.diagnostics {
+		res[k] = v
+	}
+	return res
+}
+
+func (e *Extractor) setDiagnostics(diags map[string]FormatDiagnostics) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.diagnostics = diags
 }
 
 func (e *Extractor) Name() string {

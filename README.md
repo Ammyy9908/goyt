@@ -134,6 +134,7 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 - `-stall-timeout`: Network inactivity timeout per media request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
 - `-url-refreshes`: Maximum URL re-extraction attempts across the entire job on expired or forbidden media (default `1`, `0` disables). Resumed jobs receive a fresh refresh budget.
 - `-out`: Destination file path. In video mode, extension must match the container (`.mp4`, `.webm`, `.mkv`, default `video.<container>`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
+- `-js-runtime`: JavaScript runtime for solving player cipher/n challenges: `none`, `node`, `deno`, `bun`, `qjs`, `auto`, or custom binary path (default `none`). When configured, challenge-resolution diagnostics for selected formats are printed to `stderr` (e.g. `Format 18: signature=not_required, n=not_required` or `Format 18: signature=resolved(runtime), n=resolved(cache)`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
 - `-version`: Print `goyt` version.
 
@@ -167,6 +168,7 @@ Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signatu
 **Flags:**
 - `-url`: Public YouTube video or YouTube Music track URL (required).
 - `-client`: Client response to inspect: `web`, `visionos`, or `all` (default `all`).
+- `-js-runtime`: JavaScript runtime for solving player cipher/n challenges: `none`, `node`, `deno`, `bun`, `qjs`, `auto`, or custom binary path (default `none`).
 - `-json`: Emit stable, machine-readable JSON output to stdout.
 
 #### Machine-Readable JSON Output (`-json`)
@@ -532,12 +534,56 @@ Results are stored under `compat-results/`. These checks depend on network
 conditions and YouTube's current responses. Manual playback checks are
 separate from automated PASS results.
 
+## JavaScript Challenge Solver (`-js-runtime`)
+
+YouTube streams extracted via the `web` client profile often require signature deciphering and n-parameter transformations located inside YouTube's player JavaScript. `goyt` includes an AST-based solver engine that executes player transformation routines using a local JavaScript runtime.
+
+### Configuration
+
+Challenge solving is enabled explicitly via the `-js-runtime` CLI flag:
+
+```sh
+# Auto-detect available JS runtime (checks node, deno, bun, qjs in PATH)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime auto
+
+# Explicit runtime selection
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime node
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime deno
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime bun
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime qjs
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime /usr/local/bin/node
+
+# Inspect stream metadata with configured solver validation
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime auto -json
+```
+
+- **Default Behavior**: `-js-runtime none` (unchallenged downloads and `visionos` extraction operate without any JS runtime dependency).
+- **URL Refresh**: The configured solver is automatically passed through URL re-extraction and persistent job resumption.
+- **Inspection Semantics**: Running `goyt inspect -js-runtime ...` validates solver configuration and reports detected challenge requirements without downloading media segments or declaring unresolved formats as verified.
+
+### Execution Boundaries & Security Model
+
+- **Self-Contained Embedded Bundle**: The AST solver engine (`yt-dlp-ejs` 0.8.0, `meriyah` 6.1.4, `astring` 1.9.0) is embedded directly inside the `goyt` binary and written to a secure temporary file (`0600` permissions) on demand. No external packages, Python extractors, or remote solver code are downloaded.
+- **Process Boundaries by Runtime**:
+  - **Deno (Sandboxed)**: Executed with `--no-prompt` and `--allow-read=<bundlePath>,<realPath>`. Network (`--allow-net`), file writing (`--allow-write`), environment (`--allow-env`), and subprocess creation (`--allow-run`) are disallowed.
+  - **Node.js, Bun, QuickJS**: Executed as standard child processes with direct argument passing (no shell). These runtimes do not enforce fine-grained capability sandboxing without external OS-level containerization (e.g. cgroups, namespaces, or jails).
+  - **Custom Paths**: When an explicit binary path is provided, the runtime kind is inferred from the binary's basename (`deno`, `bun`, `qjs`/`quickjs`, defaulting to `node`).
+- **Resource Limits & Process Control**:
+  - Standard output is capped at **10 MB**. If output exceeds this threshold, the child process is terminated immediately and reaped.
+  - Standard error is captured up to **64 KB** and continuously drained to prevent process pipe deadlocks.
+  - Invocations enforce a default **15-second deadline** with immediate process termination upon context cancellation.
+  - *Note*: Child process heap memory is not bounded by stdio limits; OS-level memory limits (e.g. `ulimit` or cgroups) apply.
+- **Version-Isolated In-Memory Cache**:
+  - In-memory thread-safe LRU cache (capacity: 1,000 entries) eliminates redundant process invocations during multi-format extractions.
+  - Cache keys are structured as `bundleVersion|scriptIdentity|challengeKind|inputVal`, where `scriptIdentity` incorporates `URL#sha256=HEX`.
+  - Keys (≤4096 bytes) and values (≤2048 bytes) are size-bounded. Sensitive challenge tokens and signed URLs are kept in memory only and never persisted to disk or job manifests.
+
 ## Limitations
 
-- No JavaScript signature/N-challenge solver or PO-token provider is bundled in this phase. The extractor provides a replaceable `ChallengeSolver` interface and secure player-script discovery pipeline for future solver integrations, while defaulting to safe unsupported diagnostic error reporting.
+- JavaScript challenge solving requires a supported host JS runtime (`node`, `deno`, `bun`, `qjs`) enabled via `-js-runtime`. No PO-token generation, cookie/account import, or SABR downloading is included.
 - No DASH or SABR downloading.
 - No automatic client fallback or bypass: When YouTube returns a bot-check challenge (e.g. `LOGIN_REQUIRED` with "Sign in to confirm you’re not a bot", commonly observed on Oracle Cloud and datacenter IP ranges), `goyt` diagnoses the condition descriptively (`bot_check_required`) without claiming to bypass it, attempting challenge solving, or automatically falling back to another client.
-- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability. Structured validation of solver outputs cannot guarantee that YouTube will accept the deciphered media request.
+- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability. Structured validation of solver outputs cannot guarantee that YouTube will accept the deciphered media request. Resolved URLs are only verified for download when a real media request succeeds.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.

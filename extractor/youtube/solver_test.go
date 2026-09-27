@@ -844,3 +844,902 @@ func TestPlayerScript_IdentityAndIsolation(t *testing.T) {
 		t.Fatalf("script 2 should not have a cache hit under script 1's identity; got %q", result)
 	}
 }
+
+func TestFormatDiagnostics_UnchallengedWithSolverConfigured(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Unchallenged Stream"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"formats": [
+				{
+					"itag": 18,
+					"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+					"url": "https://media.test/combined.mp4?expire=12345678"
+				}
+			]
+		}
+	}`
+
+	solverCalled := false
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			solverCalled = true
+			return NewChallengeBatchResult(), nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if solverCalled {
+		t.Fatal("solver should not be called for unchallenged formats")
+	}
+	if len(media.Formats) != 1 || media.Formats[0].ID != "18" {
+		t.Fatalf("expected format 18, got %+v", media.Formats)
+	}
+
+	diag, ok := ext.FormatDiagnostics("18")
+	if !ok {
+		t.Fatal("expected format diagnostics for 18")
+	}
+	if diag.Signature.Detected || diag.Signature.Resolved || diag.Signature.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected signature status: %+v", diag.Signature)
+	}
+	if diag.NParam.Detected || diag.NParam.Resolved || diag.NParam.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected n status: %+v", diag.NParam)
+	}
+	expectedStr := "Format 18: signature=not_required, n=not_required"
+	if diag.String() != expectedStr {
+		t.Fatalf("diag.String() = %q, want %q", diag.String(), expectedStr)
+	}
+}
+
+func TestFormatDiagnostics_RuntimeResolution(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Runtime Resolved"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=CIPHER123&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080%3Fn%3DNVAL123"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_sig",
+					Source:     ResolutionRuntime,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "solved_n",
+					Source:      ResolutionRuntime,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(media.Formats))
+	}
+
+	diag, ok := ext.FormatDiagnostics("137")
+	if !ok {
+		t.Fatal("expected format diagnostics for 137")
+	}
+	if !diag.Signature.Detected || !diag.Signature.Resolved || diag.Signature.Source != ResolutionRuntime {
+		t.Fatalf("unexpected signature status: %+v", diag.Signature)
+	}
+	if !diag.NParam.Detected || !diag.NParam.Resolved || diag.NParam.Source != ResolutionRuntime {
+		t.Fatalf("unexpected n status: %+v", diag.NParam)
+	}
+	expectedStr := "Format 137: signature=resolved(runtime), n=resolved(runtime)"
+	if diag.String() != expectedStr {
+		t.Fatalf("diag.String() = %q, want %q", diag.String(), expectedStr)
+	}
+}
+
+func TestFormatDiagnostics_CacheResolution(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Cache Resolved"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=CIPHER123&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080%3Fn%3DNVAL123"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "cached_sig",
+					Source:     ResolutionCache,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "cached_n",
+					Source:      ResolutionCache,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(media.Formats))
+	}
+
+	diag, ok := ext.FormatDiagnostics("137")
+	if !ok {
+		t.Fatal("expected format diagnostics for 137")
+	}
+	if !diag.Signature.Detected || !diag.Signature.Resolved || diag.Signature.Source != ResolutionCache {
+		t.Fatalf("unexpected signature status: %+v", diag.Signature)
+	}
+	if !diag.NParam.Detected || !diag.NParam.Resolved || diag.NParam.Source != ResolutionCache {
+		t.Fatalf("unexpected n status: %+v", diag.NParam)
+	}
+	expectedStr := "Format 137: signature=resolved(cache), n=resolved(cache)"
+	if diag.String() != expectedStr {
+		t.Fatalf("diag.String() = %q, want %q", diag.String(), expectedStr)
+	}
+}
+
+func TestFormatDiagnostics_MixedRuntimeCacheResolution(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Mixed Resolved"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=CIPHER123&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080%3Fn%3DNVAL123"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "runtime_sig",
+					Source:     ResolutionRuntime,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "cache_n",
+					Source:      ResolutionCache,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(media.Formats))
+	}
+
+	diag, ok := ext.FormatDiagnostics("137")
+	if !ok {
+		t.Fatal("expected format diagnostics for 137")
+	}
+	if !diag.Signature.Detected || !diag.Signature.Resolved || diag.Signature.Source != ResolutionRuntime {
+		t.Fatalf("unexpected signature status: %+v", diag.Signature)
+	}
+	if !diag.NParam.Detected || !diag.NParam.Resolved || diag.NParam.Source != ResolutionCache {
+		t.Fatalf("unexpected n status: %+v", diag.NParam)
+	}
+	expectedStr := "Format 137: signature=resolved(runtime), n=resolved(cache)"
+	if diag.String() != expectedStr {
+		t.Fatalf("diag.String() = %q, want %q", diag.String(), expectedStr)
+	}
+}
+
+func TestFormatDiagnostics_SignatureOnlyAndNOnlyChallenges(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Sig and N Only"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=CIPHER123&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080"
+				},
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"url": "https://media.test/audio?n=NVAL123"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "runtime_sig",
+					Source:     ResolutionRuntime,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "runtime_n",
+					Source:      ResolutionRuntime,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(media.Formats))
+	}
+
+	diag137, ok := ext.FormatDiagnostics("137")
+	if !ok {
+		t.Fatal("expected format diagnostics for 137")
+	}
+	if !diag137.Signature.Detected || !diag137.Signature.Resolved || diag137.Signature.Source != ResolutionRuntime {
+		t.Fatalf("unexpected 137 sig: %+v", diag137.Signature)
+	}
+	if diag137.NParam.Detected || diag137.NParam.Resolved || diag137.NParam.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected 137 n: %+v", diag137.NParam)
+	}
+	want137 := "Format 137: signature=resolved(runtime), n=not_required"
+	if diag137.String() != want137 {
+		t.Fatalf("diag137.String() = %q, want %q", diag137.String(), want137)
+	}
+
+	diag140, ok := ext.FormatDiagnostics("140")
+	if !ok {
+		t.Fatal("expected format diagnostics for 140")
+	}
+	if diag140.Signature.Detected || diag140.Signature.Resolved || diag140.Signature.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected 140 sig: %+v", diag140.Signature)
+	}
+	if !diag140.NParam.Detected || !diag140.NParam.Resolved || diag140.NParam.Source != ResolutionRuntime {
+		t.Fatalf("unexpected 140 n: %+v", diag140.NParam)
+	}
+	want140 := "Format 140: signature=not_required, n=resolved(runtime)"
+	if diag140.String() != want140 {
+		t.Fatalf("diag140.String() = %q, want %q", diag140.String(), want140)
+	}
+}
+
+func TestFormatDiagnostics_DeduplicatedPropagatedToAllDependentFormats(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Deduplicated Stream"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=SHARED_SIG&sp=sig&url=https%3A%2F%2Fmedia.test%2F1%3Fn%3DSHARED_N"
+				},
+				{
+					"itag": 136,
+					"mimeType": "video/mp4; codecs=\"avc1.64001F\"",
+					"signatureCipher": "s=SHARED_SIG&sp=sig&url=https%3A%2F%2Fmedia.test%2F2%3Fn%3DSHARED_N"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_sig",
+					Source:     ResolutionCache,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "solved_n",
+					Source:      ResolutionRuntime,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(media.Formats))
+	}
+
+	for _, id := range []string{"137", "136"} {
+		diag, ok := ext.FormatDiagnostics(id)
+		if !ok {
+			t.Fatalf("expected format diagnostics for %s", id)
+		}
+		if !diag.Signature.Detected || !diag.Signature.Resolved || diag.Signature.Source != ResolutionCache {
+			t.Fatalf("format %s unexpected sig: %+v", id, diag.Signature)
+		}
+		if !diag.NParam.Detected || !diag.NParam.Resolved || diag.NParam.Source != ResolutionRuntime {
+			t.Fatalf("format %s unexpected n: %+v", id, diag.NParam)
+		}
+		want := fmt.Sprintf("Format %s: signature=resolved(cache), n=resolved(runtime)", id)
+		if diag.String() != want {
+			t.Fatalf("diag.String() = %q, want %q", diag.String(), want)
+		}
+	}
+}
+
+func TestFormatDiagnostics_FailedOrInvalidNeverReportedResolved(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Failed Challenges"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"formats": [
+				{
+					"itag": 18,
+					"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+					"url": "https://media.test/combined.mp4"
+				}
+			],
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=FAIL_SIG&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080"
+				},
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"url": "https://media.test/audio?n=FAIL_N"
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			// Fail signature challenge explicitly with error
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:     s.ID,
+					Source: ResolutionFailed,
+					Error:  errors.New("sig error"),
+				}
+			}
+			// Fail n-param challenge by omitting it
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only format 18 survived
+	if len(media.Formats) != 1 || media.Formats[0].ID != "18" {
+		t.Fatalf("expected only format 18, got %+v", media.Formats)
+	}
+
+	diag137, _ := ext.FormatDiagnostics("137")
+	if diag137.Signature.Resolved {
+		t.Fatal("failed format 137 signature must not be marked resolved")
+	}
+	if strings.Contains(diag137.String(), "resolved(") {
+		t.Fatalf("diag137.String() must not contain resolved, got: %s", diag137.String())
+	}
+	if diag137.String() != "Format 137: signature=unresolved, n=not_required" {
+		t.Fatalf("diag137.String() = %q", diag137.String())
+	}
+
+	diag140, _ := ext.FormatDiagnostics("140")
+	if diag140.NParam.Resolved {
+		t.Fatal("failed format 140 n must not be marked resolved")
+	}
+	if strings.Contains(diag140.String(), "resolved(") {
+		t.Fatalf("diag140.String() must not contain resolved, got: %s", diag140.String())
+	}
+	if diag140.String() != "Format 140: signature=not_required, n=unresolved" {
+		t.Fatalf("diag140.String() = %q", diag140.String())
+	}
+}
+
+func TestFormatDiagnostics_GenericSolverUnknownProvenance(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Generic Solver Stream"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 137,
+					"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+					"signatureCipher": "s=CIPHER123&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080%3Fn%3DNVAL123"
+				}
+			]
+		}
+	}`
+
+	// Generic solver that does not set Source (leaves it empty)
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_sig",
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "solved_n",
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	media, err := ext.ExtractDownloadableWithClient(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(media.Formats) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(media.Formats))
+	}
+
+	diag, ok := ext.FormatDiagnostics("137")
+	if !ok {
+		t.Fatal("expected format diagnostics for 137")
+	}
+	if !diag.Signature.Detected || !diag.Signature.Resolved || diag.Signature.Source != ResolutionUnknown {
+		t.Fatalf("unexpected signature status: %+v", diag.Signature)
+	}
+	if !diag.NParam.Detected || !diag.NParam.Resolved || diag.NParam.Source != ResolutionUnknown {
+		t.Fatalf("unexpected n status: %+v", diag.NParam)
+	}
+	expectedStr := "Format 137: signature=resolved(unknown), n=resolved(unknown)"
+	if diag.String() != expectedStr {
+		t.Fatalf("diag.String() = %q, want %q", diag.String(), expectedStr)
+	}
+}
+
+func TestFormatDiagnostics_NoSensitiveValuesLeaked(t *testing.T) {
+	diag := FormatDiagnostics{
+		FormatID: "137",
+		Signature: ChallengeStatus{
+			Detected: true,
+			Resolved: true,
+			Source:   ResolutionRuntime,
+		},
+		NParam: ChallengeStatus{
+			Detected: true,
+			Resolved: true,
+			Source:   ResolutionCache,
+		},
+	}
+
+	out := diag.String()
+	sensitiveKeywords := []string{
+		"http://", "https://", "token", "visitor", "cookie", "script", "session",
+		"player", "expire", "signatureCipher", "cipher", "secret", "CIPHER",
+	}
+	for _, kw := range sensitiveKeywords {
+		if strings.Contains(strings.ToLower(out), kw) {
+			t.Fatalf("diagnostic string %q leaked sensitive keyword %q", out, kw)
+		}
+	}
+}
+
+func TestFormatDiagnostics_TwoAudioTracksSameItag_DistinctProvenance(t *testing.T) {
+	playerJSON := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Multi-Track Audio"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {
+			"adaptiveFormats": [
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"signatureCipher": "s=ENSIG&sp=sig&url=https%3A%2F%2Fmedia.test%2Fa_en",
+					"audioTrack": {
+						"id": "en.4",
+						"displayName": "English (original)",
+						"audioIsDefault": true
+					}
+				},
+				{
+					"itag": 140,
+					"mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+					"url": "https://media.test/a_es?n=ESNVAL",
+					"audioTrack": {
+						"id": "es.4",
+						"displayName": "Spanish",
+						"audioIsDefault": false
+					}
+				}
+			]
+		}
+	}`
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_en_sig",
+					Source:     ResolutionRuntime,
+				}
+			}
+			for _, n := range batch.NParams {
+				res.NParams[n.ID] = NResult{
+					ID:          n.ID,
+					Transformed: "solved_es_n",
+					Source:      ResolutionCache,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	transport := makeWatchAndPlayerTransport(playerJSON, "var script = 1;")
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	result, err := ext.ExtractDownloadableResult(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Media.Formats) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(result.Media.Formats))
+	}
+
+	// Verify English track (en.4) - signature resolved via runtime, n not required
+	diagEN, okEN := result.FormatDiagnostics("140", "en.4")
+	if !okEN {
+		t.Fatal("expected diagnostic for 140:en.4")
+	}
+	if !diagEN.Signature.Detected || !diagEN.Signature.Resolved || diagEN.Signature.Source != ResolutionRuntime {
+		t.Fatalf("unexpected EN signature status: %+v", diagEN.Signature)
+	}
+	if diagEN.NParam.Detected || diagEN.NParam.Resolved || diagEN.NParam.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected EN n status: %+v", diagEN.NParam)
+	}
+	wantEN := "Format 140 (en.4): signature=resolved(runtime), n=not_required"
+	if diagEN.String() != wantEN {
+		t.Fatalf("diagEN.String() = %q, want %q", diagEN.String(), wantEN)
+	}
+
+	// Verify Spanish track (es.4) - signature not required, n resolved via cache
+	diagES, okES := result.FormatDiagnostics("140", "es.4")
+	if !okES {
+		t.Fatal("expected diagnostic for 140:es.4")
+	}
+	if diagES.Signature.Detected || diagES.Signature.Resolved || diagES.Signature.Source != ResolutionNotRequired {
+		t.Fatalf("unexpected ES signature status: %+v", diagES.Signature)
+	}
+	if !diagES.NParam.Detected || !diagES.NParam.Resolved || diagES.NParam.Source != ResolutionCache {
+		t.Fatalf("unexpected ES n status: %+v", diagES.NParam)
+	}
+	wantES := "Format 140 (es.4): signature=not_required, n=resolved(cache)"
+	if diagES.String() != wantES {
+		t.Fatalf("diagES.String() = %q, want %q", diagES.String(), wantES)
+	}
+}
+
+func TestFormatDiagnostics_ConcurrentExtractions_ResultIsolation(t *testing.T) {
+	const goroutines = 30
+
+	ext := New(&http.Client{
+		Transport: playerTransport(func(req *http.Request) (*http.Response, error) {
+			path := req.URL.Path
+			if path == "/watch" {
+				vid := req.URL.Query().Get("v")
+				// Even videos get runtime signature cipher; odd videos get unchallenged direct URL
+				var body string
+				if strings.HasSuffix(vid, "0") || strings.HasSuffix(vid, "2") || strings.HasSuffix(vid, "4") || strings.HasSuffix(vid, "6") || strings.HasSuffix(vid, "8") {
+					body = fmt.Sprintf(`<html><head><script src="/s/player/base.js"></script></head><body><script>ytInitialPlayerResponse = {
+						"videoDetails": {"videoId": "%s", "title": "Challenged Video %s"},
+						"playabilityStatus": {"status": "OK"},
+						"streamingData": {"adaptiveFormats": [{
+							"itag": 137,
+							"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+							"signatureCipher": "s=SIG_%s&sp=sig&url=https%%3A%%2F%%2Fmedia.test%%2Fv1080"
+						}]}
+					};</script></body></html>`, vid, vid, vid)
+				} else {
+					body = fmt.Sprintf(`<html><head><script src="/s/player/base.js"></script></head><body><script>ytInitialPlayerResponse = {
+						"videoDetails": {"videoId": "%s", "title": "Unchallenged Video %s"},
+						"playabilityStatus": {"status": "OK"},
+						"streamingData": {"formats": [{
+							"itag": 18,
+							"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+							"url": "https://media.test/v18"
+						}]}
+					};</script></body></html>`, vid, vid)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    req,
+				}, nil
+			}
+			if path == "/s/player/base.js" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/javascript"}},
+					Body:       io.NopCloser(strings.NewReader("var base = 1;")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Request:    req,
+			}, nil
+		}),
+	}, WithChallengeSolver(&fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_" + s.CipherString,
+					Source:     ResolutionRuntime,
+				}
+			}
+			return res, nil
+		},
+	}))
+
+	errCh := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			vid := fmt.Sprintf("vid%08d", idx)
+			u, _ := url.Parse(fmt.Sprintf("https://www.youtube.com/watch?v=%s", vid))
+
+			res, err := ext.ExtractDownloadableResult(context.Background(), u, ClientWeb)
+			if err != nil {
+				errCh <- fmt.Errorf("goroutine %d extract error: %w", idx, err)
+				return
+			}
+
+			if idx%2 == 0 {
+				// Even: format 137, signature resolved(runtime), n not_required
+				diag, ok := res.FormatDiagnostics("137")
+				if !ok {
+					errCh <- fmt.Errorf("goroutine %d missing diag for 137", idx)
+					return
+				}
+				if !diag.Signature.Resolved || diag.Signature.Source != ResolutionRuntime {
+					errCh <- fmt.Errorf("goroutine %d wrong sig source: %+v", idx, diag.Signature)
+					return
+				}
+				if diag.NParam.Detected {
+					errCh <- fmt.Errorf("goroutine %d unexpected n challenge detected", idx)
+					return
+				}
+				want := "Format 137: signature=resolved(runtime), n=not_required"
+				if diag.String() != want {
+					errCh <- fmt.Errorf("goroutine %d diag.String() = %q, want %q", idx, diag.String(), want)
+					return
+				}
+			} else {
+				// Odd: format 18, unchallenged, signature=not_required, n=not_required
+				diag, ok := res.FormatDiagnostics("18")
+				if !ok {
+					errCh <- fmt.Errorf("goroutine %d missing diag for 18", idx)
+					return
+				}
+				if diag.Signature.Detected || diag.NParam.Detected {
+					errCh <- fmt.Errorf("goroutine %d unexpected challenge detected for 18: %+v", idx, diag)
+					return
+				}
+				want := "Format 18: signature=not_required, n=not_required"
+				if diag.String() != want {
+					errCh <- fmt.Errorf("goroutine %d diag.String() = %q, want %q", idx, diag.String(), want)
+					return
+				}
+			}
+			errCh <- nil
+		}(i)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestFormatDiagnostics_URLRefresh_FreshProvenance(t *testing.T) {
+	// Extraction 1 (initial): cipher challenge resolved via runtime
+	// Extraction 2 (refresh): cipher challenge resolved via cache
+	playerJSON1 := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Refresh Test"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {"adaptiveFormats": [{
+			"itag": 137,
+			"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+			"signatureCipher": "s=INIT_SIG&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080"
+		}]}
+	}`
+
+	playerJSON2 := `{
+		"videoDetails": {"videoId": "testvideoid", "title": "Refresh Test"},
+		"playabilityStatus": {"status": "OK"},
+		"streamingData": {"adaptiveFormats": [{
+			"itag": 137,
+			"mimeType": "video/mp4; codecs=\"avc1.640028\"",
+			"signatureCipher": "s=REFRESH_SIG&sp=sig&url=https%3A%2F%2Fmedia.test%2F1080_refreshed"
+		}]}
+	}`
+
+	callCount := 0
+	transport := playerTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/watch" {
+			callCount++
+			pJSON := playerJSON1
+			if callCount > 1 {
+				pJSON = playerJSON2
+			}
+			body := fmt.Sprintf(`<html><head><script src="/s/player/base.js"></script></head><body><script>ytInitialPlayerResponse = %s;</script></body></html>`, pJSON)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		}
+		if req.URL.Path == "/s/player/base.js" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/javascript"}},
+				Body:       io.NopCloser(strings.NewReader("var script = 1;")),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Request: req}, nil
+	})
+
+	solver := &fakeSolver{
+		solveFunc: func(ctx context.Context, script PlayerScript, batch ChallengeBatch) (ChallengeBatchResult, error) {
+			res := NewChallengeBatchResult()
+			for _, s := range batch.Signatures {
+				src := ResolutionRuntime
+				if s.CipherString == "REFRESH_SIG" {
+					src = ResolutionCache
+				}
+				res.Signatures[s.ID] = SignatureResult{
+					ID:         s.ID,
+					Deciphered: "solved_" + s.CipherString,
+					Source:     src,
+				}
+			}
+			return res, nil
+		},
+	}
+
+	ext := New(&http.Client{Transport: transport}, WithChallengeSolver(solver))
+	u, _ := url.Parse("https://www.youtube.com/watch?v=testvideoid")
+
+	// Extraction 1 (initial)
+	res1, err := ext.ExtractDownloadableResult(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("initial extract failed: %v", err)
+	}
+	diag1, _ := res1.FormatDiagnostics("137")
+	if diag1.Signature.Source != ResolutionRuntime {
+		t.Fatalf("initial extract expected runtime, got: %s", diag1.Signature.Source)
+	}
+	if diag1.String() != "Format 137: signature=resolved(runtime), n=not_required" {
+		t.Fatalf("diag1 = %q", diag1.String())
+	}
+
+	// Extraction 2 (refresh)
+	res2, err := ext.ExtractDownloadableResult(context.Background(), u, ClientWeb)
+	if err != nil {
+		t.Fatalf("refresh extract failed: %v", err)
+	}
+	diag2, _ := res2.FormatDiagnostics("137")
+	if diag2.Signature.Source != ResolutionCache {
+		t.Fatalf("refresh extract expected cache, got: %s", diag2.Signature.Source)
+	}
+	if diag2.String() != "Format 137: signature=resolved(cache), n=not_required" {
+		t.Fatalf("diag2 = %q", diag2.String())
+	}
+
+	// Confirm res1 diagnostics were NOT mutated by extraction 2
+	diag1After, _ := res1.FormatDiagnostics("137")
+	if diag1After.Signature.Source != ResolutionRuntime {
+		t.Fatalf("res1 diagnostics were mutated by subsequent extraction: %+v", diag1After)
+	}
+}

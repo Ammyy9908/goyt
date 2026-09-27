@@ -31,6 +31,19 @@ func (e *Extractor) ExtractDownloadableWithClient(
 	u *url.URL,
 	clientName string,
 ) (*goyt.Media, error) {
+	res, err := e.ExtractDownloadableResult(ctx, u, clientName)
+	if err != nil {
+		return nil, err
+	}
+	return res.Media, nil
+}
+
+// ExtractDownloadableResult obtains candidate direct-download formats and result-scoped challenge diagnostics.
+func (e *Extractor) ExtractDownloadableResult(
+	ctx context.Context,
+	u *url.URL,
+	clientName string,
+) (*DownloadableResult, error) {
 	clientName, err := ValidateClient(clientName)
 	if err != nil {
 		return nil, err
@@ -110,10 +123,49 @@ func (e *Extractor) ExtractDownloadableWithClient(
 		}
 	}
 
+	formatDiags := make(map[string]FormatDiagnostics)
+
 	// 1. Convert direct unchallenged candidates immediately.
 	for _, cand := range unchallenged {
+		fmtID := strconv.Itoa(cand.raw.Itag)
+		key := cand.DiagnosticKey()
+		d := FormatDiagnostics{
+			FormatID:     fmtID,
+			AudioTrackID: cand.audioTrackID,
+			Signature:    ChallengeStatus{Detected: false, Resolved: false, Source: ResolutionNotRequired},
+			NParam:       ChallengeStatus{Detected: false, Resolved: false, Source: ResolutionNotRequired},
+		}
+		formatDiags[key] = d
 		if format, ok := convertResolvedFormat(cand.raw, cand.directURL, profile); ok {
 			media.Formats = append(media.Formats, format)
+		}
+	}
+
+	// Record initial detection states for challenged formats.
+	for _, cand := range challenged {
+		fmtID := strconv.Itoa(cand.raw.Itag)
+		key := cand.DiagnosticKey()
+		sigSrc := ResolutionNotRequired
+		if cand.hasSig {
+			sigSrc = ResolutionFailed
+		}
+		nSrc := ResolutionNotRequired
+		if cand.hasN {
+			nSrc = ResolutionFailed
+		}
+		formatDiags[key] = FormatDiagnostics{
+			FormatID:     fmtID,
+			AudioTrackID: cand.audioTrackID,
+			Signature: ChallengeStatus{
+				Detected: cand.hasSig,
+				Resolved: false,
+				Source:   sigSrc,
+			},
+			NParam: ChallengeStatus{
+				Detected: cand.hasN,
+				Resolved: false,
+				Source:   nSrc,
+			},
 		}
 	}
 
@@ -122,27 +174,30 @@ func (e *Extractor) ExtractDownloadableWithClient(
 		if len(watchHTML) == 0 {
 			watchHTML, err = e.fetchWatchPageHTML(ctx, id)
 			if err != nil {
+				e.setDiagnostics(formatDiags)
 				if len(media.Formats) == 0 {
 					return nil, classifyExtractionFailure(clientName, err)
 				}
-				return media, nil
+				return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
 			}
 		}
 
 		scriptURL, sErr := DiscoverPlayerScriptURL(watchHTML)
 		if sErr != nil {
+			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
 				return nil, classifyExtractionFailure(clientName, sErr)
 			}
-			return media, nil
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
 		}
 
 		script, fErr := e.fetchPlayerScript(ctx, scriptURL)
 		if fErr != nil {
+			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
 				return nil, classifyExtractionFailure(clientName, fErr)
 			}
-			return media, nil
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
 		}
 
 		// Build deduplicated batch.
@@ -183,52 +238,72 @@ func (e *Extractor) ExtractDownloadableWithClient(
 
 		solverResult, solveErr := solver.SolveChallenges(ctx, script, batch)
 		if solveErr != nil {
+			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
 				return nil, classifyExtractionFailure(clientName, fmt.Errorf("challenge solver: %w", solveErr))
 			}
-			return media, nil
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
 		}
 
-		// Validate solver output against batch requests.
-		validatedSigs := make(map[string]string)
+		// Validate solver output against batch requests and record resolution source.
+		type validatedItem struct {
+			val string
+			src ResolutionSource
+		}
+		validatedSigs := make(map[string]validatedItem)
 		for id, res := range solverResult.Signatures {
 			if !expectedSigIDs[id] || res.ID != id || res.Error != nil || res.Deciphered == "" || len(res.Deciphered) > MaxTransformedValueLength {
 				continue
 			}
-			validatedSigs[id] = res.Deciphered
+			src := res.Source
+			if src == "" {
+				src = ResolutionUnknown
+			}
+			validatedSigs[id] = validatedItem{val: res.Deciphered, src: src}
 		}
 
-		validatedNParams := make(map[string]string)
+		validatedNParams := make(map[string]validatedItem)
 		for id, res := range solverResult.NParams {
 			if !expectedNIDs[id] || res.ID != id || res.Error != nil || res.Transformed == "" || len(res.Transformed) > MaxTransformedValueLength {
 				continue
 			}
-			validatedNParams[id] = res.Transformed
+			src := res.Source
+			if src == "" {
+				src = ResolutionUnknown
+			}
+			validatedNParams[id] = validatedItem{val: res.Transformed, src: src}
 		}
 
 		// Apply validated results to each challenged candidate.
 		for _, cand := range challenged {
+			key := cand.DiagnosticKey()
+			diag := formatDiags[key]
+
 			var decipheredSig string
+			var sigSource ResolutionSource = ResolutionNotRequired
 			var transformedN string
+			var nSource ResolutionSource = ResolutionNotRequired
 			failed := false
 
 			if cand.hasSig {
 				sigID := sigToID[cand.cipherS]
-				deciphered, ok := validatedSigs[sigID]
+				item, ok := validatedSigs[sigID]
 				if !ok {
 					failed = true
 				} else {
-					decipheredSig = deciphered
+					decipheredSig = item.val
+					sigSource = item.src
 				}
 			}
 
 			if cand.hasN && !failed {
 				nID := nToID[cand.nVal]
-				transformed, ok := validatedNParams[nID]
+				item, ok := validatedNParams[nID]
 				if !ok {
 					failed = true
 				} else {
-					transformedN = transformed
+					transformedN = item.val
+					nSource = item.src
 				}
 			}
 
@@ -249,23 +324,33 @@ func (e *Extractor) ExtractDownloadableWithClient(
 			q := parsedURL.Query()
 			if cand.hasSig {
 				q.Set(cand.cipherSP, decipheredSig)
+				diag.Signature.Resolved = true
+				diag.Signature.Source = sigSource
 			}
 			if cand.hasN {
 				q.Set("n", transformedN)
+				diag.NParam.Resolved = true
+				diag.NParam.Source = nSource
 			}
 			parsedURL.RawQuery = q.Encode()
 
 			if format, ok := convertResolvedFormat(cand.raw, parsedURL.String(), profile); ok {
+				formatDiags[key] = diag
 				media.Formats = append(media.Formats, format)
 			}
 		}
 	}
 
+	e.setDiagnostics(formatDiags)
+
 	if len(media.Formats) == 0 {
 		return nil, classifyNoSupportedFormats(clientName, player)
 	}
 
-	return media, nil
+	return &DownloadableResult{
+		Media:       media,
+		Diagnostics: formatDiags,
+	}, nil
 }
 
 type candidateFormat struct {
@@ -274,10 +359,15 @@ type candidateFormat struct {
 	cipherURL    string
 	cipherS      string
 	cipherSP     string
+	audioTrackID string
 	hasSig       bool
 	hasN         bool
 	nVal         string
 	isChallenged bool
+}
+
+func (c candidateFormat) DiagnosticKey() string {
+	return FormatDiagnosticKey(strconv.Itoa(c.raw.Itag), c.audioTrackID)
 }
 
 func parseCandidateFormat(raw playerFormat) (candidateFormat, bool) {
@@ -288,6 +378,11 @@ func parseCandidateFormat(raw playerFormat) (candidateFormat, bool) {
 	// Reject conflicting simultaneous cipher formats.
 	if raw.SignatureCipher != "" && raw.Cipher != "" {
 		return candidateFormat{}, false
+	}
+
+	var audioTrackID string
+	if raw.AudioTrack != nil {
+		audioTrackID = raw.AudioTrack.ID
 	}
 
 	cipher := raw.SignatureCipher
@@ -336,6 +431,7 @@ func parseCandidateFormat(raw playerFormat) (candidateFormat, bool) {
 			cipherURL:    rawURL,
 			cipherS:      s,
 			cipherSP:     sp,
+			audioTrackID: audioTrackID,
 			hasSig:       true,
 			hasN:         hasN,
 			nVal:         nVal,
@@ -361,6 +457,7 @@ func parseCandidateFormat(raw playerFormat) (candidateFormat, bool) {
 		return candidateFormat{
 			raw:          raw,
 			directURL:    raw.URL,
+			audioTrackID: audioTrackID,
 			hasSig:       false,
 			hasN:         hasN,
 			nVal:         nVal,
