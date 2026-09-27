@@ -109,7 +109,7 @@ func (h *HLSDownloader) DownloadWithAudioLanguage(
 		return nil, err
 	}
 
-	resolved, err := h.resolvePlaylistLanguage(
+	resolved, err := h.ResolvePlaylistLanguage(
 		ctx,
 		resource,
 		maxHeight,
@@ -119,7 +119,29 @@ func (h *HLSDownloader) DownloadWithAudioLanguage(
 		return nil, err
 	}
 
-	tracks := []*hlsTrack{resolved.Video}
+	return h.DownloadResolved(ctx, resolved, destination, options, progress)
+}
+
+func (h *HLSDownloader) DownloadResolved(
+	ctx context.Context,
+	resolved *ResolvedHLS,
+	destination string,
+	options DownloadOptions,
+	progress func(HLSProgress),
+) (*HLSResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if h == nil || h.http == nil || h.processor == nil {
+		return nil, errors.New("goyt: create HLSDownloader with its constructor")
+	}
+
+	if resolved == nil || resolved.Video == nil {
+		return nil, errors.New("goyt: invalid resolved HLS presentation")
+	}
+
+	tracks := []*HLSTrack{resolved.Video}
 	if resolved.Audio != nil {
 		// Reject clearly mismatched completed presentations before downloading.
 		// This checks duration only; synchronization is validated by playback.
@@ -309,6 +331,90 @@ func (h *HLSDownloader) DownloadAudio(
 		return nil, errors.New("goyt: invalid retry options")
 	}
 
+	data, base, headers, err := h.fetchPlaylist(ctx, resource)
+	if err != nil {
+		return nil, err
+	}
+
+	var track *HLSTrack
+	var selectedAudio *HLSAudioRendition
+	var isOriginal bool
+	var warning string
+
+	if !isHLSMaster(data) {
+		if audioLanguage != "" {
+			return nil, errors.New(
+				"goyt: cannot select an audio language from a media playlist without master rendition metadata",
+			)
+		}
+
+		playlist, err := ParseHLS(data, base)
+		if err != nil {
+			return nil, err
+		}
+
+		track = &HLSTrack{
+			Playlist: playlist,
+			BaseURL:  base,
+			Headers:  headers,
+		}
+	} else {
+		master, err := ParseHLSMaster(data, base)
+		if err != nil {
+			return nil, err
+		}
+
+		audioSelection, err := master.SelectAudioOnly(audioLanguage)
+		if err != nil {
+			return nil, err
+		}
+
+		selectedAudio = &audioSelection.Audio
+		isOriginal = audioSelection.AudioIsOriginal
+		warning = audioSelection.AudioWarning
+
+		track, err = h.resolveMediaTrack(ctx, audioSelection.Audio.URL, base, headers)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return h.DownloadAudioTrack(
+		ctx,
+		track,
+		selectedAudio,
+		isOriginal,
+		warning,
+		resolvedSpec,
+		destination,
+		options,
+		progress,
+	)
+}
+
+func (h *HLSDownloader) DownloadAudioTrack(
+	ctx context.Context,
+	track *HLSTrack,
+	selectedAudio *HLSAudioRendition,
+	isOriginal bool,
+	warning string,
+	resolvedSpec AudioOutputSpec,
+	destination string,
+	options DownloadOptions,
+	progress func(HLSProgress),
+) (*HLSAudioResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if h == nil || h.http == nil || h.processor == nil {
+		return nil, errors.New("goyt: create HLSDownloader with its constructor")
+	}
+
+	if track == nil || track.Playlist == nil {
+		return nil, errors.New("goyt: invalid audio track")
+	}
+
 	output, err := filepath.Abs(destination)
 	if err != nil {
 		return nil, err
@@ -332,57 +438,6 @@ func (h *HLSDownloader) DownloadAudio(
 			Stage:   stage,
 			WorkDir: workDir,
 			Err:     err,
-		}
-	}
-
-	data, base, headers, err := h.fetchPlaylist(ctx, resource)
-	if err != nil {
-		return fail("fetch playlist", err)
-	}
-
-	var track *hlsTrack
-	var selectedAudio *HLSAudioRendition
-	var isOriginal bool
-	var warning string
-
-	if !isHLSMaster(data) {
-		if audioLanguage != "" {
-			return fail(
-				"resolve playlist",
-				errors.New(
-					"goyt: cannot select an audio language from a media playlist without master rendition metadata",
-				),
-			)
-		}
-
-		playlist, err := ParseHLS(data, base)
-		if err != nil {
-			return fail("parse media playlist", err)
-		}
-
-		track = &hlsTrack{
-			Playlist: playlist,
-			BaseURL:  base,
-			Headers:  headers,
-		}
-	} else {
-		master, err := ParseHLSMaster(data, base)
-		if err != nil {
-			return fail("parse master playlist", err)
-		}
-
-		audioSelection, err := master.SelectAudioOnly(audioLanguage)
-		if err != nil {
-			return fail("select audio rendition", err)
-		}
-
-		selectedAudio = &audioSelection.Audio
-		isOriginal = audioSelection.AudioIsOriginal
-		warning = audioSelection.AudioWarning
-
-		track, err = h.resolveMediaTrack(ctx, audioSelection.Audio.URL, base, headers)
-		if err != nil {
-			return fail("resolve audio track", err)
 		}
 	}
 
@@ -461,7 +516,7 @@ func (h *HLSDownloader) DownloadAudio(
 
 func (h *HLSDownloader) downloadTrack(
 	ctx context.Context,
-	track *hlsTrack,
+	track *HLSTrack,
 	destination string,
 	options DownloadOptions,
 	onSegment func(),

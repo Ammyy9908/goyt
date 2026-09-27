@@ -26,6 +26,8 @@ type HLSVariant struct {
 	Bandwidth  int64
 	Codecs     string
 	AudioGroup string
+	FrameRate  string
+	VideoRange string
 }
 
 type HLSMaster struct {
@@ -125,6 +127,8 @@ func ParseHLSMaster(data []byte, base *url.URL) (*HLSMaster, error) {
 				Bandwidth:  bandwidth,
 				Codecs:     attributes["CODECS"],
 				AudioGroup: attributes["AUDIO"],
+				FrameRate:  attributes["FRAME-RATE"],
+				VideoRange: attributes["VIDEO-RANGE"],
 			}
 
 			if resolution := attributes["RESOLUTION"]; resolution != "" {

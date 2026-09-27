@@ -455,10 +455,10 @@ func (d *Downloader) attempt(
 
 	if resp.StatusCode != http.StatusOK &&
 		resp.StatusCode != http.StatusPartialContent {
-		return nil, false, fmt.Errorf(
-			"goyt: unexpected HTTP status %d",
-			resp.StatusCode,
-		)
+		return nil, false, &HTTPStatusError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+		}
 	}
 
 	if encoding := resp.Header.Get("Content-Encoding"); encoding != "" &&

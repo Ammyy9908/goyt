@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ammyy9908/goyt"
@@ -183,6 +186,11 @@ func TestDownloadFlagValidation(t *testing.T) {
 			name:    "negative stall-timeout in download",
 			args:    []string{"download", "-url", "https://youtube.com/watch?v=12345678901", "-stall-timeout", "-10s"},
 			wantErr: "stall-timeout cannot be negative",
+		},
+		{
+			name:    "negative url-refreshes in download",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=12345678901", "-url-refreshes", "-1"},
+			wantErr: "url-refreshes cannot be negative",
 		},
 	}
 
@@ -830,6 +838,623 @@ func TestInspectCLI_TextOutputPreserved(t *testing.T) {
 		}
 		if !strings.Contains(outStr, "ID") || !strings.Contains(outStr, "QUALITY") || !strings.Contains(outStr, "DIRECT URL") {
 			t.Fatalf("expected table headers in text output, got: %s", outStr)
+		}
+	})
+}
+
+func makeMockPlayerJSON(videoID, itag18URL string) string {
+	return fmt.Sprintf(`{
+	"videoDetails": {
+		"videoId": %q,
+		"title": "Mock YouTube Video",
+		"lengthSeconds": "120"
+	},
+	"playabilityStatus": {
+		"status": "OK"
+	},
+	"streamingData": {
+		"formats": [
+			{
+				"itag": 18,
+				"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+				"qualityLabel": "360p",
+				"height": 360,
+				"url": %q
+			}
+		]
+	}
+}`, videoID, itag18URL)
+}
+
+func TestDownloadCLI_403Refresh_Recovery(t *testing.T) {
+	var extractionCount atomic.Int32
+	var mediaOldCount atomic.Int32
+	var mediaNewCount atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			count := extractionCount.Add(1)
+			url := "https://media.test/old_url.mp4"
+			if count > 1 {
+				url = "https://media.test/new_url.mp4"
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", url))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/old_url.mp4" {
+			mediaOldCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/new_url.mp4" {
+			mediaNewCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden, // 403 on replacement stops because budget=1
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "1",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error on final 403, got nil")
+		}
+
+		if extractionCount.Load() != 2 {
+			t.Fatalf("expected 2 extractions (initial + 1 refresh), got %d", extractionCount.Load())
+		}
+		if mediaOldCount.Load() != 1 {
+			t.Fatalf("expected 1 request to old URL, got %d", mediaOldCount.Load())
+		}
+		if mediaNewCount.Load() != 1 {
+			t.Fatalf("expected 1 request to new refreshed URL, got %d", mediaNewCount.Load())
+		}
+
+		stderrStr := stderr.String()
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure (1/1).") {
+			t.Fatalf("expected refresh notice in stderr, got: %s", stderrStr)
+		}
+		if !strings.Contains(stderrStr, "Restarting the affected transfer.") {
+			t.Fatalf("expected restart notice in stderr, got: %s", stderrStr)
+		}
+	})
+}
+
+func TestDownloadCLI_RefreshDisabled_NoReExtraction(t *testing.T) {
+	var extractionCount atomic.Int32
+	var mediaCount atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			extractionCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", "https://media.test/video.mp4"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/video.mp4" {
+			mediaCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "0",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error on 403 when refresh is disabled, got nil")
+		}
+
+		if extractionCount.Load() != 1 {
+			t.Fatalf("expected exactly 1 extraction when refresh is disabled, got %d", extractionCount.Load())
+		}
+		if mediaCount.Load() != 1 {
+			t.Fatalf("expected exactly 1 media request, got %d", mediaCount.Load())
+		}
+		if strings.Contains(stderr.String(), "Refreshing playback URLs") {
+			t.Fatalf("unexpected refresh notice in stderr when refresh is disabled: %s", stderr.String())
+		}
+	})
+}
+
+func TestDownloadCLI_RefreshedVideoIDMismatch(t *testing.T) {
+	var extractionCount atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			count := extractionCount.Add(1)
+			if count == 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", "https://media.test/video.mp4"))),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("different123", "https://media.test/video2.mp4"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/video.mp4" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "1",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error on video ID mismatch, got nil")
+		}
+		if !strings.Contains(err.Error(), "different video ID") && !strings.Contains(err.Error(), "does not match original") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+}
+
+func TestDownloadCLI_PreflightExpiredResourceRefreshes(t *testing.T) {
+	var extractionCount atomic.Int32
+	var mediaCount atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			count := extractionCount.Add(1)
+			if count == 1 {
+				// Expired timestamp (year 1970)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", "https://media.test/video.mp4?expire=1000"))),
+					Request:    req,
+				}, nil
+			}
+			// Fresh timestamp (year 2033)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", "https://media.test/video_fresh.mp4?expire=2000000000"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.Path == "/video_fresh.mp4" {
+			mediaCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden, // stops after 1 refresh because budget=1
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "1",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error on final 403, got nil")
+		}
+
+		if extractionCount.Load() != 2 {
+			t.Fatalf("expected 2 extractions (initial expired + 1 preflight refresh), got %d", extractionCount.Load())
+		}
+		if mediaCount.Load() != 1 {
+			t.Fatalf("expected 1 media request to refreshed fresh URL, got %d", mediaCount.Load())
+		}
+
+		stderrStr := stderr.String()
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure (1/1).") {
+			t.Fatalf("expected refresh notice in stderr, got: %s", stderrStr)
+		}
+	})
+}
+
+func TestDownloadCLI_Repeated403_ExhaustsBudget(t *testing.T) {
+	var extractionCount atomic.Int32
+	var mediaRequests atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			count := extractionCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", fmt.Sprintf("https://media.test/video_%d.mp4", count)))),
+				Request:    req,
+			}, nil
+		}
+
+		if strings.HasPrefix(req.URL.String(), "https://media.test/video_") {
+			mediaRequests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "2",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error when budget exhausted, got nil")
+		}
+
+		// Initial + 2 refreshes = 3 extractions and 3 media requests
+		if extractionCount.Load() != 3 {
+			t.Fatalf("expected 3 extractions, got %d", extractionCount.Load())
+		}
+		if mediaRequests.Load() != 3 {
+			t.Fatalf("expected 3 media requests, got %d", mediaRequests.Load())
+		}
+
+		stderrStr := stderr.String()
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure (1/2).") {
+			t.Fatalf("expected (1/2) notice, got: %s", stderrStr)
+		}
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure (2/2).") {
+			t.Fatalf("expected (2/2) notice, got: %s", stderrStr)
+		}
+	})
+}
+
+func TestDownloadCLI_Cancellation_InterruptsRefresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var extractionCount atomic.Int32
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			extractionCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerJSON("abcdefghijk", "https://media.test/video.mp4"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://media.test/video.mp4" {
+			// Cancel context on first media request
+			cancel()
+			return nil, context.Canceled
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(ctx, []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "http",
+			"-url-refreshes", "5",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		if extractionCount.Load() != 1 {
+			t.Fatalf("expected 1 extraction before cancellation, got %d", extractionCount.Load())
+		}
+	})
+}
+
+func makeMockPlayerHLSJSON(videoID, hlsManifestURL string) string {
+	return fmt.Sprintf(`{
+	"videoDetails": {
+		"videoId": %q,
+		"title": "Mock YouTube Video",
+		"lengthSeconds": "120"
+	},
+	"playabilityStatus": {
+		"status": "OK"
+	},
+	"streamingData": {
+		"hlsManifestUrl": %q
+	}
+}`, videoID, hlsManifestURL)
+}
+
+func TestDownloadCLI_HLSPlaylist403_Recovery(t *testing.T) {
+	var extractionCount atomic.Int32
+	var manifest1Requests atomic.Int32
+	var manifest2Requests atomic.Int32
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			count := extractionCount.Add(1)
+			manifestURL := "https://manifest.test/master_1.m3u8"
+			if count > 1 {
+				manifestURL = "https://manifest.test/master_2.m3u8"
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerHLSJSON("abcdefghijk", manifestURL))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://manifest.test/master_1.m3u8" {
+			manifest1Requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://manifest.test/master_2.m3u8" {
+			manifest2Requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden, // stops after 1 refresh probe
+				Status:     "403 Forbidden",
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+				Request:    req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "hls",
+			"-url-refreshes", "1",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if err == nil {
+			t.Fatal("expected error on final 403, got nil")
+		}
+
+		if extractionCount.Load() != 2 {
+			t.Fatalf("expected 2 extractions (initial + 1 refresh), got %d", extractionCount.Load())
+		}
+		if manifest1Requests.Load() != 1 {
+			t.Fatalf("expected 1 request to manifest 1, got %d", manifest1Requests.Load())
+		}
+		if manifest2Requests.Load() != 1 {
+			t.Fatalf("expected 1 request to manifest 2, got %d", manifest2Requests.Load())
+		}
+
+		stderrStr := stderr.String()
+		if !strings.Contains(stderrStr, "Refreshing playback URLs after media access failure (1/1).") {
+			t.Fatalf("expected refresh notice in stderr, got: %s", stderrStr)
+		}
+		if !strings.Contains(stderrStr, "Restarting the affected transfer.") {
+			t.Fatalf("expected restart notice in stderr, got: %s", stderrStr)
+		}
+	})
+}
+
+func TestDownloadCLI_HLSCancellation_NoReExtraction(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var extractionCount atomic.Int32
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.String() == "https://www.youtube.com/youtubei/v1/player?prettyPrint=false" {
+			extractionCount.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(makeMockPlayerHLSJSON("abcdefghijk", "https://manifest.test/master.m3u8"))),
+				Request:    req,
+			}, nil
+		}
+
+		if req.URL.String() == "https://manifest.test/master.m3u8" {
+			// Cancel context during manifest fetch
+			cancel()
+			return nil, context.Canceled
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("not found")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(ctx, []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-transport", "hls",
+			"-url-refreshes", "5",
+			"-out", filepath.Join(t.TempDir(), "output.mp4"),
+		}, &stdout, &stderr)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		if extractionCount.Load() != 1 {
+			t.Fatalf("expected 1 extraction before cancellation, got %d", extractionCount.Load())
 		}
 	})
 }

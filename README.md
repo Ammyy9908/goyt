@@ -75,6 +75,12 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 # Download with custom overall job timeout and network inactivity stall protection
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -timeout 2h -stall-timeout 45s
 
+# Download with bounded URL refresh enabled (default 1 refresh attempt)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -url-refreshes 1
+
+# Download with URL refresh disabled
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -url-refreshes 0
+
 # Download with CLI overall timeout disabled (only parent context applies)
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -timeout 0
 ```
@@ -90,6 +96,7 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 - `-audio-language`: Audio language tag, e.g. `en` or `en-US` (supports HLS and HTTP formats with language metadata).
 - `-timeout`: Overall job timeout covering extraction, downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline.
 - `-stall-timeout`: Network inactivity timeout per media request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
+- `-url-refreshes`: Maximum URL re-extraction attempts across the entire job on expired or forbidden media (default `1`, `0` disables). Negative values are rejected before network access or file creation.
 - `-out`: Destination file path. In video mode, must have an `.mp4` extension (default `video.mp4`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
 - `-version`: Print `goyt` version.
@@ -354,6 +361,23 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Parent context cancellation (`context.Canceled`) and parent deadlines (`context.DeadlineExceeded`) take strict precedence over stall classification and immediately abort the job without retry.
   - **Caller HTTP Client Configuration**: Custom `http.Client.Timeout` or custom `http.RoundTripper` implementations configured by library callers apply independently to HTTP operations; custom transport implementations that ignore request context cancellation will not benefit from request-scoped stall watchdog cancellation.
 
+### Bounded URL Refresh & Media Access Recovery
+- **Single Job Budget (`-url-refreshes`)**: Maintains a single, job-scoped URL refresh budget (default `1`, `0` disables) across all streams, segments, and formats in the download job. Every re-extraction attempt, including failed attempts, charges the budget.
+- **Trigger Policy**:
+  - Automatically refreshes on known-expiration errors (`ErrResourceExpired` or `Resource.ExpiresAt` passed prior to making a network request).
+  - On media access failures (HTTP 403 Forbidden or HTTP 410 Gone), a bounded refresh is attempted as a recovery probe (`Refreshing playback URLs after media access failure (X/Y).`). HTTP 403/410 status codes are treated as access failures rather than definitive proof of expiration.
+  - Non-refreshable errors (user cancellation, job deadline exceeded, disk/verification errors, unsupported codecs, rate limits 429, or server 5xx errors handled by network retries) do not trigger URL refresh.
+- **Strict Stream Identity Preservation**:
+  - **Direct HTTP**: Re-extraction matches the original YouTube video ID, format itag, container, video/audio codecs, pixel dimensions, and audio track identity (language, track ID, original/default markers). If representation identity is ambiguous or disappeared, execution halts with a clear error rather than silently falling back to a different quality or language.
+  - **HLS**: Re-extraction matches the original variant resolution, codecs, and audio rendition metadata (name, language, default, autoselect). Heuristic audio selection is never re-run, preventing silent language or rendition switches.
+- **Safe Restart & Partial File Isolation**:
+  - When an HTTP media URL changes, incomplete transfers restart cleanly from byte 0 in isolation without appending new data to stale partial files.
+  - HLS downloads restart in a fresh attempt directory, ensuring old and new segment generations or local playlist files are never mixed.
+  - Same-resource strong-ETag and Content-Range resume rules continue to apply for network retries of unchanged URLs.
+- **Destination Safety & Retention**:
+  - Preexisting destination files remain untouched until all downloads, processing, metadata verification, and optional decode checks succeed.
+  - Failed attempt directories are retained under the standard work-directory policy and logged to standard error.
+
 ## Development Checks
 
 ```sh
@@ -392,8 +416,7 @@ separate from automated PASS results.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.
-- No automatic fallback between HTTP and HLS, or automatic refresh of expired
-  media URLs.
+- No automatic transport switching between HTTP and HLS, client fallback, quality fallback, or whole-job resume across process restarts. Arbitrary-URL `goyt hls` does not support YouTube re-extraction.
 - HLS support excludes encryption, fragmented MP4 initialization sections,
   byte-range segments, discontinuities, nested master playlists, and alternate
   video renditions.

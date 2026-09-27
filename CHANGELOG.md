@@ -16,6 +16,15 @@
 - Normalized duration in seconds (`duration_seconds`), sorted unique video heights (`available_video_heights`), and honest original-audio heuristics (`original_hint`).
 - Strict allowlist filtering ensuring signed media/manifest URLs, cookies, authorization headers, visitor identifiers, and raw API responses are excluded from JSON output.
 - Structured per-client error reporting with safe error codes (`context_canceled`, `timeout`, `player_response_missing`, `extraction_failed`), preserving partial successful results under `-client all`.
+- Bounded URL refresh in `goyt download` via `-url-refreshes` (default `1`, `0` disables, negative values rejected) across direct HTTP and HLS transports for video and audio-only downloads.
+- Single job-scoped refresh budget across all streams, segments, and formats; every re-extraction attempt (including failures) charges the budget.
+- Recovery probe triggers on known expiration (`ErrResourceExpired` / `Resource.ExpiresAt` passed) and media access failures (HTTP 403 Forbidden / HTTP 410 Gone) with stderr notices.
+- Retained `HTTPStatusError` across all HLS master/media playlist requests so HTTP 403/410 failures qualify for bounded recovery.
+- Strict stream and variant identity preservation across refreshes: matches video ID, format itag, audio track ID, language, original/default markers, container, codecs, and dimensions for direct HTTP; preserves and matches `FRAME-RATE` and `VIDEO-RANGE` for HLS variants, rejecting missing metadata and unresolved ambiguity without using bandwidth to select across different frame rates or dynamic ranges.
+- Scoped HLS audio rendition matching: binds refreshed audio renditions strictly within the audio group linked to the matched refreshed variant, permitting manifest group ID changes while rejecting global generic "Default" matches.
+- Strict cancellation and deadline precedence (`context.Canceled`, `context.DeadlineExceeded`) over refresh triggers, exiting immediately without re-extraction.
+- Safe restart isolation: HTTP transfers restart from byte 0 without appending old partial bytes when URLs change; HLS transfers restart in fresh attempt directories without mixing segment generations.
+- Staged output verification and destination preservation ensuring existing files are untouched until verification and decode checks succeed.
 
 ## [0.1.0-rc.4] - 2026-09-27
 
