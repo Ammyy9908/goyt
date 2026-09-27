@@ -1,0 +1,1021 @@
+{
+  "schema_version": 1,
+  "job_id": "afa85a1e-d31e-40b9-a269-95c5134011e6",
+  "created_at": "2026-09-27T14:00:07.877712Z",
+  "updated_at": "2026-09-27T14:01:20.227225Z",
+  "source_url": "https://youtu.be/_ijaEtNzZgw",
+  "video_id": "_ijaEtNzZgw",
+  "title": "Maruti (Official Video) Dhanda Nyoliwala | Miki Malang | Ron Likhari",
+  "duration_seconds": 262.04,
+  "destination_path": "/Users/sumitkumar/Desktop/systems/goyt/rc6-smoke.mp4",
+  "transport": "hls",
+  "mode": "video",
+  "stage": "completed",
+  "selection": {
+    "max_height": 720,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "container": "mp4",
+    "allow_separate": true
+  },
+  "output_container": "mp4",
+  "decode_check": true,
+  "hls": {
+    "generation": 4,
+    "selected_variant": {
+      "width": 1080,
+      "height": 720,
+      "bandwidth": 1803972,
+      "codecs": "avc1.4D401F,mp4a.40.2",
+      "audio_group": "234",
+      "frame_rate": "25",
+      "video_range": "SDR"
+    },
+    "selected_audio": {
+      "group_id": "234",
+      "name": "Default",
+      "default": true,
+      "auto_select": true
+    },
+    "audio_warning": "goyt: original audio track could not be established from metadata; selecting fallback audio \"Default\" ()",
+    "tracks": [
+      {
+        "index": 0,
+        "role": "video",
+        "generation": 4,
+        "variant": {
+          "width": 1080,
+          "height": 720,
+          "bandwidth": 1803972,
+          "codecs": "avc1.4D401F,mp4a.40.2",
+          "audio_group": "234",
+          "frame_rate": "25",
+          "video_range": "SDR"
+        },
+        "target_duration": 7,
+        "media_sequence": 0,
+        "duration_seconds": 262.04,
+        "segments": [
+          {
+            "index": 0,
+            "duration_seconds": 4.32,
+            "url_fingerprint": "efa9e93d590c13da77bba995e7442e7b738d33739bab3cfee11ec2fe8072665c",
+            "relative_path": "hls/gen-4/track-0/segment-00000.ts",
+            "completed": true,
+            "size_bytes": 24440,
+            "sha256": "28176ebf4cf042371982446b99c09e7d74ab811f69e547893a72b61075868e5c"
+          },
+          {
+            "index": 1,
+            "duration_seconds": 7,
+            "url_fingerprint": "5a8131a937719666952bf4a6ebc19d51c056da1564e189cc37e0c5a412041dae",
+            "relative_path": "hls/gen-4/track-0/segment-00001.ts",
+            "completed": true,
+            "size_bytes": 764408,
+            "sha256": "50df5ba94f629a0306b3e9b8a0288c957aa1e1c631979d6e9254ece7d7a00e97"
+          },
+          {
+            "index": 2,
+            "duration_seconds": 3.56,
+            "url_fingerprint": "7b9498ed1ac080100fc68b1b7fbbf8ff2fd46d78b108ce2504f849a7045ebfb5",
+            "relative_path": "hls/gen-4/track-0/segment-00002.ts",
+            "completed": true,
+            "size_bytes": 412472,
+            "sha256": "5979fc4428d2b7f725aef23a6b5d68717399ecc1a421b7ea56422c0ff3081d93"
+          },
+          {
+            "index": 3,
+            "duration_seconds": 6.5600000000000005,
+            "url_fingerprint": "57ba9efbe44d505a04edab86162c39f213a7ce25ee24ed8aa09102d3b45548f4",
+            "relative_path": "hls/gen-4/track-0/segment-00003.ts",
+            "completed": true,
+            "size_bytes": 650104,
+            "sha256": "96d468e3ab74f53d67786485625b61ea15e1aa2a8ba585373c6eadc88219a2a5"
+          },
+          {
+            "index": 4,
+            "duration_seconds": 3,
+            "url_fingerprint": "21a7bf5100f055894f67e81036ddca2215e2c87d66b514283bedfbd6c286675d",
+            "relative_path": "hls/gen-4/track-0/segment-00004.ts",
+            "completed": true,
+            "size_bytes": 337272,
+            "sha256": "37462ec3279acb9198cb268f3def0f173bb9eed0fbab400242ed7b89d2a53a7c"
+          },
+          {
+            "index": 5,
+            "duration_seconds": 4.96,
+            "url_fingerprint": "4f7a6be8c82797f9fd6278b972002a7dfac2cf46f7e3fe7e8a053c3d86e5ff67",
+            "relative_path": "hls/gen-4/track-0/segment-00005.ts",
+            "completed": true,
+            "size_bytes": 523768,
+            "sha256": "1b078331c5496f91360c01bb53926a15e04a5053c7d947c955edb4253e970fea"
+          },
+          {
+            "index": 6,
+            "duration_seconds": 7,
+            "url_fingerprint": "8c9b601c839a23dce7b319d94ef4b1e779463620e95f571ac5e545fce6a38e96",
+            "relative_path": "hls/gen-4/track-0/segment-00006.ts",
+            "completed": true,
+            "size_bytes": 761400,
+            "sha256": "6eb6057597ce3581e136d900e23186ee1da3fb5b8b58f7b8877fbdf92928c785"
+          },
+          {
+            "index": 7,
+            "duration_seconds": 7,
+            "url_fingerprint": "b4a2ec406f5bb2a8df8ebc3f42976cca40f69c8cd857528c1f9d9cca929ca70e",
+            "relative_path": "hls/gen-4/track-0/segment-00007.ts",
+            "completed": true,
+            "size_bytes": 1023096,
+            "sha256": "fb6581bb50c737a1af1c0a7fb05e58ce7fccee1b43f6740a164059ed3fe69c38"
+          },
+          {
+            "index": 8,
+            "duration_seconds": 5.76,
+            "url_fingerprint": "1b507f8291ce7f26206832151e4c14af5350b1139931b875fb1e76691aa1ffee",
+            "relative_path": "hls/gen-4/track-0/segment-00008.ts",
+            "completed": true,
+            "size_bytes": 725304,
+            "sha256": "e65700d5f7e67493510a2f072f82526e4ce849b3ef94d7b1e9f484f64cede700"
+          },
+          {
+            "index": 9,
+            "duration_seconds": 7,
+            "url_fingerprint": "02dfa9802ca46b62c50b0382744a7e31ac8e0e006f7cccc576567b7365ee6bec",
+            "relative_path": "hls/gen-4/track-0/segment-00009.ts",
+            "completed": true,
+            "size_bytes": 1035128,
+            "sha256": "eaff3e65515170eddda391bddf5e03435c135a2254fc9834a133b63f17ea26c1"
+          },
+          {
+            "index": 10,
+            "duration_seconds": 3.04,
+            "url_fingerprint": "af4609c6eb1975db36f0f22db3cfefb966c3bda9c308bfed0e042c0ad3515b6b",
+            "relative_path": "hls/gen-4/track-0/segment-00010.ts",
+            "completed": true,
+            "size_bytes": 505720,
+            "sha256": "c25e38a0606749f58b015776cac69e911a1e68e2066210bd1157d56e0b127ece"
+          },
+          {
+            "index": 11,
+            "duration_seconds": 3.08,
+            "url_fingerprint": "acb154b4ef3324cfcc892067fe78659cb390f05e7618ff55a2746afe0f337aa3",
+            "relative_path": "hls/gen-4/track-0/segment-00011.ts",
+            "completed": true,
+            "size_bytes": 391416,
+            "sha256": "70818102939134ecf15da6ca2ea091ca29d6b00890c843af3ce68b69a1f31cf0"
+          },
+          {
+            "index": 12,
+            "duration_seconds": 5.6,
+            "url_fingerprint": "c099b6a7dbb71ff6aa93748a213161ae65cf153cf03e23141d9271f24024ce1c",
+            "relative_path": "hls/gen-4/track-0/segment-00012.ts",
+            "completed": true,
+            "size_bytes": 710264,
+            "sha256": "bfd6c13d38770f72177b2145174bf18741a0d18c8bcba21e3a2e0b5d8a72a79b"
+          },
+          {
+            "index": 13,
+            "duration_seconds": 5.32,
+            "url_fingerprint": "13b94d9faed08de7e3840c28ec164abf495b04ed74745c3726d2e935135ccbfd",
+            "relative_path": "hls/gen-4/track-0/segment-00013.ts",
+            "completed": true,
+            "size_bytes": 938872,
+            "sha256": "736961af6d0028971c7910ce64c7f68ea75f9b56ae8b1d2f89e9d921399272bf"
+          },
+          {
+            "index": 14,
+            "duration_seconds": 4.16,
+            "url_fingerprint": "0d0c79d74348f9e02634a732a9f64b8f7f049ecb5c3d49441b8d5d4097d4d223",
+            "relative_path": "hls/gen-4/track-0/segment-00014.ts",
+            "completed": true,
+            "size_bytes": 445560,
+            "sha256": "d6a60d29c6aecff94d4ba31dc93ed9e41c248dccbfa25f775b7ea1bc37d31fa8"
+          },
+          {
+            "index": 15,
+            "duration_seconds": 3.08,
+            "url_fingerprint": "e8f0e0a489197f5168375216e026c5e2c9c59e34f23c76c3fb79fec25421e82b",
+            "relative_path": "hls/gen-4/track-0/segment-00015.ts",
+            "completed": true,
+            "size_bytes": 331256,
+            "sha256": "16373bd08133fe17e09544e08011fe3b09dc7da51e3b80c769a378ac7cfb8cdb"
+          },
+          {
+            "index": 16,
+            "duration_seconds": 3.12,
+            "url_fingerprint": "967f73205f26cce6b3970a419be7537427c8f76c143bb49cab0269743ffbb8c7",
+            "relative_path": "hls/gen-4/track-0/segment-00016.ts",
+            "completed": true,
+            "size_bytes": 352312,
+            "sha256": "2f846f28c12dd027b32049d3b14072a85f43a4b00bbc4f640f700f1e50a7b29c"
+          },
+          {
+            "index": 17,
+            "duration_seconds": 3.96,
+            "url_fingerprint": "5a28561caf2808dfe0b6c840d1d13f860f4b9f1bcf4a0347e04f2fc6795ff511",
+            "relative_path": "hls/gen-4/track-0/segment-00017.ts",
+            "completed": true,
+            "size_bytes": 439544,
+            "sha256": "d6a01de5b3855b90415274d62350e5a2959a3add9706378fcf74ccd217bc5a4a"
+          },
+          {
+            "index": 18,
+            "duration_seconds": 5.6,
+            "url_fingerprint": "fdb71fc522ed96cdca71cb2069b01ff25c78f9db9e7f58becbae029d919c78d9",
+            "relative_path": "hls/gen-4/track-0/segment-00018.ts",
+            "completed": true,
+            "size_bytes": 611000,
+            "sha256": "919e4e5a104693b450fb504aebe78872f5b5d34e236b5a4ad27ff405565ded71"
+          },
+          {
+            "index": 19,
+            "duration_seconds": 6,
+            "url_fingerprint": "557202fddd6cc2df25a7bdd821daabe6365ee994e90991a284b72fb213826e0e",
+            "relative_path": "hls/gen-4/track-0/segment-00019.ts",
+            "completed": true,
+            "size_bytes": 662136,
+            "sha256": "349f1bdfdca79df21be14ed77a10fb9f6111d36e463ca7cb6156e5aed7372e5b"
+          },
+          {
+            "index": 20,
+            "duration_seconds": 3.68,
+            "url_fingerprint": "bc4dcd7ab18f8cb5447fd8529e15c4a17f2f5884eb4a30dcfef8f740a377cb8c",
+            "relative_path": "hls/gen-4/track-0/segment-00020.ts",
+            "completed": true,
+            "size_bytes": 614008,
+            "sha256": "f6338b07ecc239b42ff1bbf2c5292bbf7a46467d45ae97c88863b1c54ca3a721"
+          },
+          {
+            "index": 21,
+            "duration_seconds": 5.64,
+            "url_fingerprint": "fcf1555cfca352eb652750d3e7b0a05be2292a4d875284c5552e67ef97e0a030",
+            "relative_path": "hls/gen-4/track-0/segment-00021.ts",
+            "completed": true,
+            "size_bytes": 890744,
+            "sha256": "439db3d443522099e13e7e648d2ccaa6f336ac44ad03a3abded65a2cf5b8a45b"
+          },
+          {
+            "index": 22,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "16fa4bd4d046f639674277d59a9e3b7bd8789f57c297982e98ab7a929372b223",
+            "relative_path": "hls/gen-4/track-0/segment-00022.ts",
+            "completed": true,
+            "size_bytes": 592952,
+            "sha256": "72536e16a38773d5f7b4e1ca1455c03663c3dee54e0df744d6181b594ba4145a"
+          },
+          {
+            "index": 23,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "184dd873b863093a7c4309d5b326e9dbc063919fe7429b13b5654a98c2c66e77",
+            "relative_path": "hls/gen-4/track-0/segment-00023.ts",
+            "completed": true,
+            "size_bytes": 538808,
+            "sha256": "42441efc11aca49afdcae333d74164c03bf36670d46018a6dc36fc0e8aa2df71"
+          },
+          {
+            "index": 24,
+            "duration_seconds": 7,
+            "url_fingerprint": "5a2ace40b45b14bbef491264dd162e3ff1820f75a1a1810234a70a6784f05ae9",
+            "relative_path": "hls/gen-4/track-0/segment-00024.ts",
+            "completed": true,
+            "size_bytes": 1245688,
+            "sha256": "f24416c5c3aa4f6e82b2c4b7cd87ff1f308a9e3d205fbee44264372c071760de"
+          },
+          {
+            "index": 25,
+            "duration_seconds": 7,
+            "url_fingerprint": "7a969824da94aaf8eadca80d073ff0a99133af29c8f5de7533d74c4680243ab2",
+            "relative_path": "hls/gen-4/track-0/segment-00025.ts",
+            "completed": true,
+            "size_bytes": 1053176,
+            "sha256": "56977be0040b34735c6b579c24666ca6a6de784b515afe7a0663614da292289d"
+          },
+          {
+            "index": 26,
+            "duration_seconds": 5.28,
+            "url_fingerprint": "3d13c4ceb7c109276682532ee8b7bd9b3eab5adbe21d32471332881c2367026f",
+            "relative_path": "hls/gen-4/track-0/segment-00026.ts",
+            "completed": true,
+            "size_bytes": 1044152,
+            "sha256": "f6bd0db6111e1c0d5c1a8a4da8e42d5908b26b5dd4310a891ca5cb7fd6c9378c"
+          },
+          {
+            "index": 27,
+            "duration_seconds": 3.84,
+            "url_fingerprint": "f2b3be8bd08ac7d9795e48777ca47ea09d2d7a433293b744b56bcaa1761e874b",
+            "relative_path": "hls/gen-4/track-0/segment-00027.ts",
+            "completed": true,
+            "size_bytes": 791480,
+            "sha256": "5c15e7fd0a62d31b91f06e7edd39ce0afe35f4e1239bd00da92d5d1f0dee37f7"
+          },
+          {
+            "index": 28,
+            "duration_seconds": 6.28,
+            "url_fingerprint": "29f7be63a9007555f3c64c21f9f2970bbbe384586b4d2958d78d443db9da617a",
+            "relative_path": "hls/gen-4/track-0/segment-00028.ts",
+            "completed": true,
+            "size_bytes": 1227640,
+            "sha256": "78a1ee5b2cc6b6a2da0cf0c9f48ad8b7ea0ca200e5babaf0660b2a353b1d8ff3"
+          },
+          {
+            "index": 29,
+            "duration_seconds": 3.76,
+            "url_fingerprint": "ebddc3442c39bc71dfd3baa2f8289b69e664851d428ee91e9cacd4d6010a75e8",
+            "relative_path": "hls/gen-4/track-0/segment-00029.ts",
+            "completed": true,
+            "size_bytes": 490680,
+            "sha256": "c61c87d88ecfdce73a4699251504935e3a5fe9aca1bbd7218189ef6ec427d7c0"
+          },
+          {
+            "index": 30,
+            "duration_seconds": 6.6,
+            "url_fingerprint": "5079302ff1ff52d33f6fb0c94d439974033169e26626f876386c1e72fb3f6fd7",
+            "relative_path": "hls/gen-4/track-0/segment-00030.ts",
+            "completed": true,
+            "size_bytes": 980984,
+            "sha256": "4d7546473f3414378ac8c4140394b3c52e4c33c56958ed042768180c7ac8ec0f"
+          },
+          {
+            "index": 31,
+            "duration_seconds": 6.36,
+            "url_fingerprint": "8086ebae60a5676ef1a96cf12b6a54739da732a521ecc3da34ddb1ae55c662da",
+            "relative_path": "hls/gen-4/track-0/segment-00031.ts",
+            "completed": true,
+            "size_bytes": 839608,
+            "sha256": "a86013fd8034a51cedc3416a27a1b2da7876d78001e8f8ba23cd3ad8482f8ea2"
+          },
+          {
+            "index": 32,
+            "duration_seconds": 3,
+            "url_fingerprint": "78ee47f4b49affc63b6959d859d21ba36bc252cbb54e97fb18019958562bce91",
+            "relative_path": "hls/gen-4/track-0/segment-00032.ts",
+            "completed": true,
+            "size_bytes": 379384,
+            "sha256": "273bb981a44e0d8793170a616e6b47d4f8392f6da7dcd1beb14c269c0b5ed2e8"
+          },
+          {
+            "index": 33,
+            "duration_seconds": 3.88,
+            "url_fingerprint": "b3d2c8cdeff3e0b3642825fb23808501eecaca8d137d64666d3a08e23f6076b6",
+            "relative_path": "hls/gen-4/track-0/segment-00033.ts",
+            "completed": true,
+            "size_bytes": 418488,
+            "sha256": "27ea173a17cec706a7f708cd74671c206db6a0aea159baa851043e7911903f9f"
+          },
+          {
+            "index": 34,
+            "duration_seconds": 7,
+            "url_fingerprint": "1163e491bc25c90e77f09ea3748684e90de9616f4e54e11848339102078f8f8e",
+            "relative_path": "hls/gen-4/track-0/segment-00034.ts",
+            "completed": true,
+            "size_bytes": 821560,
+            "sha256": "60cd3dc0497ae436bd749e8197c7491270907d9b435c9667aeeab055ba3a5d0b"
+          },
+          {
+            "index": 35,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "754a942f99e916bfebc95dc63f60341bd99a0f7c4c1dbe6f2a99b6a28d1170a7",
+            "relative_path": "hls/gen-4/track-0/segment-00035.ts",
+            "completed": true,
+            "size_bytes": 421496,
+            "sha256": "28f348776fbf5c90199deaafcba592265f341ce65057900f6f6f98b6f92b137b"
+          },
+          {
+            "index": 36,
+            "duration_seconds": 7,
+            "url_fingerprint": "2f2d8fabb3b00802344b90850dbf37ca489c9cc4c57c8c439f6a445951a833ac",
+            "relative_path": "hls/gen-4/track-0/segment-00036.ts",
+            "completed": true,
+            "size_bytes": 755384,
+            "sha256": "4ebf5702f40e4392e9dedd7314ab9fdc5478b86ea1864bca3cc21b1424ca336a"
+          },
+          {
+            "index": 37,
+            "duration_seconds": 5.36,
+            "url_fingerprint": "e58abc6bd688bc0bda41c859e51dbebabf2a838db1de81e93fab66ca6e9b9020",
+            "relative_path": "hls/gen-4/track-0/segment-00037.ts",
+            "completed": true,
+            "size_bytes": 595960,
+            "sha256": "697ed4e1aff4eec2c5077d2a4cc22c30f2e2a4fdb4dfcb5ac7075d2a92b74131"
+          },
+          {
+            "index": 38,
+            "duration_seconds": 7,
+            "url_fingerprint": "db0f19fd31e5c53a7533a0977e6fc90c8a4586559affefd31e0e81ba03cc169a",
+            "relative_path": "hls/gen-4/track-0/segment-00038.ts",
+            "completed": true,
+            "size_bytes": 1065208,
+            "sha256": "6fbb32d529c4d3313b57c557a6c0e9ce69db7663d055884746b35ec2b66885c9"
+          },
+          {
+            "index": 39,
+            "duration_seconds": 4.28,
+            "url_fingerprint": "f4b412bfa93fe27369929970a916fd919ac61147cb1d152614becb88e11adc10",
+            "relative_path": "hls/gen-4/track-0/segment-00039.ts",
+            "completed": true,
+            "size_bytes": 478648,
+            "sha256": "affb69e514f45c075fe955274d324c70429e3db8784cbf6906789d75b8e07798"
+          },
+          {
+            "index": 40,
+            "duration_seconds": 5.4,
+            "url_fingerprint": "1a6fb6663e5ae99c65fb425d4c50d5fa3e68195d88f7e990668b865716a30edb",
+            "relative_path": "hls/gen-4/track-0/segment-00040.ts",
+            "completed": true,
+            "size_bytes": 586936,
+            "sha256": "0b747e683eb1ad5ab498e16cd5a5c409cd9c95a0f39267622e50878bef572fa3"
+          },
+          {
+            "index": 41,
+            "duration_seconds": 5.2,
+            "url_fingerprint": "c1ea904e57cb7d3ab74ee3a9dcc6a4ac62243984a0d758595956113e9bbf1348",
+            "relative_path": "hls/gen-4/track-0/segment-00041.ts",
+            "completed": true,
+            "size_bytes": 668152,
+            "sha256": "b14dc4ce678caee1b296f3d0eeadef8714cd9627f8ce5a39df0ea755334e8d10"
+          },
+          {
+            "index": 42,
+            "duration_seconds": 5.16,
+            "url_fingerprint": "7e5bdd91beb2dd5b14362c7d03f381ec8409321a1dc4861210515d1886691cb9",
+            "relative_path": "hls/gen-4/track-0/segment-00042.ts",
+            "completed": true,
+            "size_bytes": 556856,
+            "sha256": "db25ec47ea0df79d666f720f067112d3d9f4ea580d6782397cbd0da576b86379"
+          },
+          {
+            "index": 43,
+            "duration_seconds": 3.2800000000000002,
+            "url_fingerprint": "d6e5af22f93a3d04c20db10ed47d1663dd629cc072b2839503e0a0e57e18d4fc",
+            "relative_path": "hls/gen-4/track-0/segment-00043.ts",
+            "completed": true,
+            "size_bytes": 424504,
+            "sha256": "c350cccb0848e56df63673077472466a865cd8e044dad63a01dd35a02baead73"
+          },
+          {
+            "index": 44,
+            "duration_seconds": 7,
+            "url_fingerprint": "f35b75122583991afc514584f6ba08b206410bfa9ae58f8d89e710b8c160d0da",
+            "relative_path": "hls/gen-4/track-0/segment-00044.ts",
+            "completed": true,
+            "size_bytes": 818552,
+            "sha256": "f01e41d9f65ac9dc16a525afaa66de6b66b96675dee07d8b181d3a8019bdfa71"
+          },
+          {
+            "index": 45,
+            "duration_seconds": 4.28,
+            "url_fingerprint": "62b58b070baebdc31767e9ab58106a40d5507da55c040d78ae412bbaa87e372e",
+            "relative_path": "hls/gen-4/track-0/segment-00045.ts",
+            "completed": true,
+            "size_bytes": 478648,
+            "sha256": "806ccc6a58691219be8441e7a19bac4e63b3d4991daa65838646dd65481235de"
+          },
+          {
+            "index": 46,
+            "duration_seconds": 6.4,
+            "url_fingerprint": "e63a31c5ff62eab0e9d2e920fa0eaee0e278e3c18334a895ee2605f3e2a12044",
+            "relative_path": "hls/gen-4/track-0/segment-00046.ts",
+            "completed": true,
+            "size_bytes": 713272,
+            "sha256": "608c443f1fbd77f78daea4621f60f0b9347ec039d8f03a03f4cdadba9368ca4c"
+          },
+          {
+            "index": 47,
+            "duration_seconds": 5.12,
+            "url_fingerprint": "2ae515f3b5a1e072a88e798a4b7f46857faec89a1f7a9c18b2b45cacfb975f53",
+            "relative_path": "hls/gen-4/track-0/segment-00047.ts",
+            "completed": true,
+            "size_bytes": 565880,
+            "sha256": "4603dcebe108e5382f7906d4ca343de14eaf6717a35415112b48483cfbfb318f"
+          },
+          {
+            "index": 48,
+            "duration_seconds": 4.04,
+            "url_fingerprint": "e6b1d30cd588392e4f1084b3ba646c3b4af9ae7b49b2276ca39d406bafef2298",
+            "relative_path": "hls/gen-4/track-0/segment-00048.ts",
+            "completed": true,
+            "size_bytes": 111672,
+            "sha256": "b58148a1fb9a885017bed28e8669aa5cc8bbc5123ccd6cbac59c6893e6b5e6c2"
+          },
+          {
+            "index": 49,
+            "duration_seconds": 5.36,
+            "url_fingerprint": "ade43a2a36b48d5017833d44e0e1cd5df30af4ac521e284014e35e7b473c7a1c",
+            "relative_path": "hls/gen-4/track-0/segment-00049.ts",
+            "completed": true,
+            "size_bytes": 451576,
+            "sha256": "45609dba14c34006c7155d2ec34ab4f06f3081fa849dfefc4fbb243124a927c0"
+          },
+          {
+            "index": 50,
+            "duration_seconds": 4.32,
+            "url_fingerprint": "218b12fa42af4834bdb5066853b8c08c85f76a9429c98ca3a925451c2f5b3d0c",
+            "relative_path": "hls/gen-4/track-0/segment-00050.ts",
+            "completed": true,
+            "size_bytes": 102648,
+            "sha256": "923759856041b7b1c2c98938e30019bddae55d9c3831a70a19fdf7e7da69c823"
+          },
+          {
+            "index": 51,
+            "duration_seconds": 4.8,
+            "url_fingerprint": "e205d754ba34d6ee0ed2ad207d703f47a9ae3ea507412ef4e12ee0f842fbc384",
+            "relative_path": "hls/gen-4/track-0/segment-00051.ts",
+            "completed": true,
+            "size_bytes": 27448,
+            "sha256": "f6d728ff3b56207ac3fdd8c36ea7533f276edc7d62871f791ceaf3737dbe139d"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "role": "audio",
+        "generation": 4,
+        "audio": {
+          "group_id": "234",
+          "name": "Default",
+          "default": true,
+          "auto_select": true
+        },
+        "target_duration": 7,
+        "media_sequence": 0,
+        "duration_seconds": 262.04,
+        "segments": [
+          {
+            "index": 0,
+            "duration_seconds": 4.32,
+            "url_fingerprint": "951a9e179b445320a85058ce568812d6b7dabd198715bc5361d7de1a69416372",
+            "relative_path": "hls/gen-4/track-1/segment-00000.aac",
+            "completed": true,
+            "size_bytes": 71014,
+            "sha256": "db53457215275afdc92575582f3147fd6b8f7b06201f1abc22b08c1fae18f0d5"
+          },
+          {
+            "index": 1,
+            "duration_seconds": 7,
+            "url_fingerprint": "c2e5968b4b45e6d9fde2075c2ff1be6c1109f79611006ae3c57e1278a09fb96c",
+            "relative_path": "hls/gen-4/track-1/segment-00001.aac",
+            "completed": true,
+            "size_bytes": 114229,
+            "sha256": "9c21d773e24a4c13d6a0a01bdc66cd9444c1cd380e057f40843c98e09d82e345"
+          },
+          {
+            "index": 2,
+            "duration_seconds": 3.56,
+            "url_fingerprint": "6e4a87e42d52a7003417d670e50e7605844f0cbd16c09c80a31f278072955498",
+            "relative_path": "hls/gen-4/track-1/segment-00002.aac",
+            "completed": true,
+            "size_bytes": 57646,
+            "sha256": "31f1273af2c6eb9a16b0191e3747891da74e0fdaa68cb483f7f88de026c68b9b"
+          },
+          {
+            "index": 3,
+            "duration_seconds": 6.5600000000000005,
+            "url_fingerprint": "302c915686a24048bafc1a618eb742de591f4bf62c63f9586b08f09083ad971d",
+            "relative_path": "hls/gen-4/track-1/segment-00003.aac",
+            "completed": true,
+            "size_bytes": 107373,
+            "sha256": "1442c08339221c0735ed030335fc9b187a17494e90b378e36cc5bd4c0a777d16"
+          },
+          {
+            "index": 4,
+            "duration_seconds": 3,
+            "url_fingerprint": "f352926c9067cfb9925eca60d3afa674e18e38149096e71b38d0ac1ec8c4e9c3",
+            "relative_path": "hls/gen-4/track-1/segment-00004.aac",
+            "completed": true,
+            "size_bytes": 48896,
+            "sha256": "b588bc1c31857d13547daf1fb110996516ca5bd8de448a28bb8d7ee5549d55cf"
+          },
+          {
+            "index": 5,
+            "duration_seconds": 4.96,
+            "url_fingerprint": "097201ea9ce7ce602dbd71187867c764d1d896d28f8e04d0c42d4ed074c83d09",
+            "relative_path": "hls/gen-4/track-1/segment-00005.aac",
+            "completed": true,
+            "size_bytes": 81203,
+            "sha256": "312e92b6f70be87b6d0a78caa732f7b026e5fe9ae6fabedf337b8d0adb0d011d"
+          },
+          {
+            "index": 6,
+            "duration_seconds": 7,
+            "url_fingerprint": "63839609c839277fb4dfdcccee0773954378df1eba9fdc1c8e0573f67bb1a302",
+            "relative_path": "hls/gen-4/track-1/segment-00006.aac",
+            "completed": true,
+            "size_bytes": 114114,
+            "sha256": "42a6312715e2d625866feac601ceb6a87083c2d5cdd077adb09d8ee3eafa5aa6"
+          },
+          {
+            "index": 7,
+            "duration_seconds": 7,
+            "url_fingerprint": "0f14ddc50819668f5b45f19106fd1f369b4ff0f940b7c155e86447be7e738120",
+            "relative_path": "hls/gen-4/track-1/segment-00007.aac",
+            "completed": true,
+            "size_bytes": 114328,
+            "sha256": "013b6cac2e53166b0c4369073156295e84c95837c773c5d576d0078346af16d9"
+          },
+          {
+            "index": 8,
+            "duration_seconds": 5.76,
+            "url_fingerprint": "8268ff3c9697d92a903cfbbc9c2034ba11c9b6297cdd0a1142d14cadab910d61",
+            "relative_path": "hls/gen-4/track-1/segment-00008.aac",
+            "completed": true,
+            "size_bytes": 94092,
+            "sha256": "82feb5e81441b374d81bbfdbf87fe0a294acbfd33fefb9c1aab7ebda4fb7466a"
+          },
+          {
+            "index": 9,
+            "duration_seconds": 7,
+            "url_fingerprint": "1b79a5044d8ba7b840db28929900c1247d86d25240548ad3439c5157088c7f5b",
+            "relative_path": "hls/gen-4/track-1/segment-00009.aac",
+            "completed": true,
+            "size_bytes": 113960,
+            "sha256": "fd417449af72a6ccb93ee847ff80d66545408fe082872826bac70f2b40a6f2fa"
+          },
+          {
+            "index": 10,
+            "duration_seconds": 3.04,
+            "url_fingerprint": "c417dab17b9519038bc3591705bac761b307ec3bd0c974213ff6f83787eb2a93",
+            "relative_path": "hls/gen-4/track-1/segment-00010.aac",
+            "completed": true,
+            "size_bytes": 49829,
+            "sha256": "e88a19c3a57d6644b4fca1c9bdbc51a14510fc94d850fdfaeda03de82ecdc4bf"
+          },
+          {
+            "index": 11,
+            "duration_seconds": 3.08,
+            "url_fingerprint": "79f7c483231a9112a906ad569f447fe7802cb8b90be0ab749085e3328dad6a97",
+            "relative_path": "hls/gen-4/track-1/segment-00011.aac",
+            "completed": true,
+            "size_bytes": 50337,
+            "sha256": "8d07c30fa95ab6a66faf50cbcb6e1d5fca4bdfc2042236ad2d58ffc5fe51a06f"
+          },
+          {
+            "index": 12,
+            "duration_seconds": 5.6,
+            "url_fingerprint": "0a7720fbaac75c41733bb72854aa0688ee7a54dca621765c82cc210dddc97f0c",
+            "relative_path": "hls/gen-4/track-1/segment-00012.aac",
+            "completed": true,
+            "size_bytes": 91027,
+            "sha256": "6e33c3032661c2fb5ea6f9ceceb5f1eadc7d2ae88b785cce28a329455c87b178"
+          },
+          {
+            "index": 13,
+            "duration_seconds": 5.32,
+            "url_fingerprint": "300afba7896c3f6a33436e5278523a8280e4672a9ef39cd880bf3f1336b50cd3",
+            "relative_path": "hls/gen-4/track-1/segment-00013.aac",
+            "completed": true,
+            "size_bytes": 86955,
+            "sha256": "703ef254061d833ce2f3eb577d161fda8b622e58ce7d7c350be44b6c36859753"
+          },
+          {
+            "index": 14,
+            "duration_seconds": 4.16,
+            "url_fingerprint": "9495bac83dbaaba4db84aa0fbffcbb0580a3e48b7e08d0d8c80248fae1932761",
+            "relative_path": "hls/gen-4/track-1/segment-00014.aac",
+            "completed": true,
+            "size_bytes": 67909,
+            "sha256": "31d4b80ef3dbcbe97fdbba1286f665ff9d59c549ed4e5202f38d603d6bf7d2fb"
+          },
+          {
+            "index": 15,
+            "duration_seconds": 3.08,
+            "url_fingerprint": "cd442700a7ad634746021d0c906a358892607e34340993f0c14f09024ca37600",
+            "relative_path": "hls/gen-4/track-1/segment-00015.aac",
+            "completed": true,
+            "size_bytes": 50246,
+            "sha256": "b5d8bf262ef7aad2e1877b86ff50d671097a7353e7ee5a741d531fb57d3e4a5b"
+          },
+          {
+            "index": 16,
+            "duration_seconds": 3.12,
+            "url_fingerprint": "9a18682a4cc8073d913c6dd8377d7c82d9a86cd809c26b5fc82b6e775193ec37",
+            "relative_path": "hls/gen-4/track-1/segment-00016.aac",
+            "completed": true,
+            "size_bytes": 50755,
+            "sha256": "0aafec18e3b4b5bc118e31d0e1d9b1c2ce1a19fe6a0d459c5cc829028724b104"
+          },
+          {
+            "index": 17,
+            "duration_seconds": 3.96,
+            "url_fingerprint": "169bb592c2d97f5eaa56b52e2b4e6149a46209c8faea190916e318a4f1d605cd",
+            "relative_path": "hls/gen-4/track-1/segment-00017.aac",
+            "completed": true,
+            "size_bytes": 64757,
+            "sha256": "1450e186a69b0356de726898904106f7b896625fc04d6efec5e93aac1318a8f6"
+          },
+          {
+            "index": 18,
+            "duration_seconds": 5.6,
+            "url_fingerprint": "c7599fc79c1ba6bbbefb4b09f9ff7f07711150f2c7522b37c99ae2e4115b36e1",
+            "relative_path": "hls/gen-4/track-1/segment-00018.aac",
+            "completed": true,
+            "size_bytes": 91376,
+            "sha256": "50957a14f7e5991e950e7521e881cca4078536d1d145dd35dab20797d87f780c"
+          },
+          {
+            "index": 19,
+            "duration_seconds": 6,
+            "url_fingerprint": "30489699c4015fe7de0127d7e703a418ebe33cba891f87053fe06283af219a2b",
+            "relative_path": "hls/gen-4/track-1/segment-00019.aac",
+            "completed": true,
+            "size_bytes": 97719,
+            "sha256": "a7d0eddcb7a84e89ad9f7fe55ad1120e5ed83fb48035a8dde365c0b3a31e6bc5"
+          },
+          {
+            "index": 20,
+            "duration_seconds": 3.68,
+            "url_fingerprint": "eb901b8b5030178ceddb3979fbebae4d0c9bd0c358d215e964deb67b76a16591",
+            "relative_path": "hls/gen-4/track-1/segment-00020.aac",
+            "completed": true,
+            "size_bytes": 60310,
+            "sha256": "2491938af60bff696fd4737d7afc73d5aed937089be71a108187cc6ccb58a8ec"
+          },
+          {
+            "index": 21,
+            "duration_seconds": 5.64,
+            "url_fingerprint": "7d55303090f591941e6cdf04c22d7060a79919a7442cd1298fdfabb975696ce2",
+            "relative_path": "hls/gen-4/track-1/segment-00021.aac",
+            "completed": true,
+            "size_bytes": 92113,
+            "sha256": "cdb79de869b9c5715acf5fc9b4a951710604565b28007cb4954d538599754b8e"
+          },
+          {
+            "index": 22,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "1d4430f4d2ba84c2e476df9bd869c66a5b486d3b6d314ed19d5ba5b644e51c96",
+            "relative_path": "hls/gen-4/track-1/segment-00022.aac",
+            "completed": true,
+            "size_bytes": 52009,
+            "sha256": "0dd03a9d4fe7022d5a24c0ddeb40196206abeae3270c4f039fc839af61a9d485"
+          },
+          {
+            "index": 23,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "9c535670b0d8de9f8476775dfc9886f6a927892bb09c7118e2646a24f5ea2509",
+            "relative_path": "hls/gen-4/track-1/segment-00023.aac",
+            "completed": true,
+            "size_bytes": 52201,
+            "sha256": "f1372028a575bd4152a8500fd6e127f7fd84ef468d13eaf55c8507d586b70aad"
+          },
+          {
+            "index": 24,
+            "duration_seconds": 7,
+            "url_fingerprint": "5292ef7c6a7fa45b8b8172485f5504275c8bd8cdda2755891974db25db4ed098",
+            "relative_path": "hls/gen-4/track-1/segment-00024.aac",
+            "completed": true,
+            "size_bytes": 114323,
+            "sha256": "c34cb7d27bb430163e22745da6fdfc49dab366bcec42f888dbcf16cd537f475f"
+          },
+          {
+            "index": 25,
+            "duration_seconds": 7,
+            "url_fingerprint": "17f2928bffc161ad4f258ab1ac7b3c275494a364fe3d37b15e1aab49d8966784",
+            "relative_path": "hls/gen-4/track-1/segment-00025.aac",
+            "completed": true,
+            "size_bytes": 114018,
+            "sha256": "3dfc364ef710ccfae26d4ea1041736100b8c9c1b29ec191bb0d0282de3f5ca62"
+          },
+          {
+            "index": 26,
+            "duration_seconds": 5.28,
+            "url_fingerprint": "284a2c096c84c431a5e2fb2c6d6f41456715cf3da9e7e7042f46765b703bed5d",
+            "relative_path": "hls/gen-4/track-1/segment-00026.aac",
+            "completed": true,
+            "size_bytes": 86560,
+            "sha256": "0f50b9387632befba80ed6defd132c25848e42cfbc6d7c18dab65fddfa943e73"
+          },
+          {
+            "index": 27,
+            "duration_seconds": 3.84,
+            "url_fingerprint": "0901c7a8480f5c04dded74942e5bf46c71c0cda449ef48f5b242855b71151e9d",
+            "relative_path": "hls/gen-4/track-1/segment-00027.aac",
+            "completed": true,
+            "size_bytes": 62343,
+            "sha256": "74ab7486750e3c1bda09e350e71168b5979f503790a1c49445a178e4f192c6e6"
+          },
+          {
+            "index": 28,
+            "duration_seconds": 6.28,
+            "url_fingerprint": "2c0788ea33e7b61baba0a5ca7ab3f8365ba1de9214e6294d87592b0a6d7624b9",
+            "relative_path": "hls/gen-4/track-1/segment-00028.aac",
+            "completed": true,
+            "size_bytes": 102336,
+            "sha256": "abb3107927577ba85ef4edbedce4bf211caa0cd69298997d9dad3928c2aecc1e"
+          },
+          {
+            "index": 29,
+            "duration_seconds": 3.76,
+            "url_fingerprint": "5da869dc2686248853c71e8fac345f178f8f90b86b53b3fb7a617ee390eb3275",
+            "relative_path": "hls/gen-4/track-1/segment-00029.aac",
+            "completed": true,
+            "size_bytes": 61345,
+            "sha256": "5ea845064f1c3a4f2cc2caeac44cf8002d7003b779cfa82b8a314737a976da5e"
+          },
+          {
+            "index": 30,
+            "duration_seconds": 6.6,
+            "url_fingerprint": "6d0f38d789c145b31e0daca030818dc3bf638b67e6aed3d5dc6b83ec6eb009e2",
+            "relative_path": "hls/gen-4/track-1/segment-00030.aac",
+            "completed": true,
+            "size_bytes": 108015,
+            "sha256": "29752f120e8a5a62ac9dfd1742c075bc8a34a8a3054f3b4d06e20923d64667c5"
+          },
+          {
+            "index": 31,
+            "duration_seconds": 6.36,
+            "url_fingerprint": "1dbecf4c0c12bac79e9e707fda45e416d281a6fdb5ecd1104e03b542f0a63f4e",
+            "relative_path": "hls/gen-4/track-1/segment-00031.aac",
+            "completed": true,
+            "size_bytes": 103533,
+            "sha256": "04802f72edb96e3474099902aec2553a6b2bf859c5e5217952dc955719f62e19"
+          },
+          {
+            "index": 32,
+            "duration_seconds": 3,
+            "url_fingerprint": "258aefd0b16ecbf2d12a74ff920d6f55b9520e2708fd52c330926106586c0a08",
+            "relative_path": "hls/gen-4/track-1/segment-00032.aac",
+            "completed": true,
+            "size_bytes": 48994,
+            "sha256": "942d59bb2a431daeacc8fed14c9be8057e956676f5eb4927e80b32c4f0ef6685"
+          },
+          {
+            "index": 33,
+            "duration_seconds": 3.88,
+            "url_fingerprint": "f516a324af5c17d9d39fbb4d897772f0051d5f0fb7042e9148c3db3e25d81407",
+            "relative_path": "hls/gen-4/track-1/segment-00033.aac",
+            "completed": true,
+            "size_bytes": 63248,
+            "sha256": "8cfdb29309b50474b85fb7ae51feaf0ab13332777762707aa73dbd6af02a8a35"
+          },
+          {
+            "index": 34,
+            "duration_seconds": 7,
+            "url_fingerprint": "ea7aee30c7cfc47673894e66521598d112673c226fbdc965c8147b934eb27066",
+            "relative_path": "hls/gen-4/track-1/segment-00034.aac",
+            "completed": true,
+            "size_bytes": 114167,
+            "sha256": "e5bc6a251c0acff40e1de740c9b64ac7e14752d6912ab0bba3c0ca416c9525c9"
+          },
+          {
+            "index": 35,
+            "duration_seconds": 3.2,
+            "url_fingerprint": "b7df4060bf602555107c87386f7726ce0b33b173d6519136f600adab6e9d896b",
+            "relative_path": "hls/gen-4/track-1/segment-00035.aac",
+            "completed": true,
+            "size_bytes": 52367,
+            "sha256": "65da5e73528d73d457664bb122192417ef04ab5554ca9066dfe14c9a545295d4"
+          },
+          {
+            "index": 36,
+            "duration_seconds": 7,
+            "url_fingerprint": "4a6155818d5cf55f5d7e029d365af3857b7f1eb04eac78734af2cd02bc62b54a",
+            "relative_path": "hls/gen-4/track-1/segment-00036.aac",
+            "completed": true,
+            "size_bytes": 113997,
+            "sha256": "a464fb82f5ee5e88de69375fc8629cf058138cc9b630091273b58726bd9bd8a7"
+          },
+          {
+            "index": 37,
+            "duration_seconds": 5.36,
+            "url_fingerprint": "0c9e6b4a49bc65e48196a1424e6b01e051c0e9bb09bdbdddd9c302c92ee943e5",
+            "relative_path": "hls/gen-4/track-1/segment-00037.aac",
+            "completed": true,
+            "size_bytes": 87580,
+            "sha256": "129e3628d6dfecaeaeeb1aa0ef5a86178775aaea2a0435e6c8fd333f1769f89b"
+          },
+          {
+            "index": 38,
+            "duration_seconds": 7,
+            "url_fingerprint": "b98c26bdce9b9aa91fc84095a1ca18e4b18b7a8f0fb8d20ac8a69ad8e38d39b8",
+            "relative_path": "hls/gen-4/track-1/segment-00038.aac",
+            "completed": true,
+            "size_bytes": 114282,
+            "sha256": "2970c84e35e19039257a8a855f8467d35449d14c4f5bb3a3d3b437ffc1829046"
+          },
+          {
+            "index": 39,
+            "duration_seconds": 4.28,
+            "url_fingerprint": "b4536db5a9400de2037987c0a1e9efe02eda8c41a46d630ba9bbf8833a7beb3d",
+            "relative_path": "hls/gen-4/track-1/segment-00039.aac",
+            "completed": true,
+            "size_bytes": 69860,
+            "sha256": "32e42603cad771d16d6cc7f965535b872aa5056150fe4bcb25dd51bc34f946b5"
+          },
+          {
+            "index": 40,
+            "duration_seconds": 5.4,
+            "url_fingerprint": "170f772de1a2de68ecdd9683a98899912a9feb5d9a3a43284595ef6b5677c5c5",
+            "relative_path": "hls/gen-4/track-1/segment-00040.aac",
+            "completed": true,
+            "size_bytes": 88108,
+            "sha256": "b54b977b0a4ba60e762560429fb86d28d8a6d82a2892d3051c35a0a59f4f65a9"
+          },
+          {
+            "index": 41,
+            "duration_seconds": 5.2,
+            "url_fingerprint": "87a0cc74e63d7871d8a12065b2e931482b981c2865c65d73302a0b4e8b37e4bb",
+            "relative_path": "hls/gen-4/track-1/segment-00041.aac",
+            "completed": true,
+            "size_bytes": 84996,
+            "sha256": "bc4a1509fa3cb36b4a3232d230b0e6bca5aa29f954e7ebf0bc51ebeada69c0db"
+          },
+          {
+            "index": 42,
+            "duration_seconds": 5.16,
+            "url_fingerprint": "8130229ada949566bb0c156d09a3626b53b2570dba112d9c8290d6b5cf006f7a",
+            "relative_path": "hls/gen-4/track-1/segment-00042.aac",
+            "completed": true,
+            "size_bytes": 83969,
+            "sha256": "4abdc297e32761e0f676d62ddad9e0ed6be8123783d2e00fc3801bb9f47e15b0"
+          },
+          {
+            "index": 43,
+            "duration_seconds": 3.2800000000000002,
+            "url_fingerprint": "77990486a9707fd66890a721bfdc3238c3abbbf9bb4232461b84fa919dd26369",
+            "relative_path": "hls/gen-4/track-1/segment-00043.aac",
+            "completed": true,
+            "size_bytes": 52977,
+            "sha256": "b0503c14f20dba71699f654427add015352179a749c6ca30fbe26745ea1742bc"
+          },
+          {
+            "index": 44,
+            "duration_seconds": 7,
+            "url_fingerprint": "05886edb913ff0f47d9f78ee8e057945b0554f44f6572e0ffafae3e925e611b1",
+            "relative_path": "hls/gen-4/track-1/segment-00044.aac",
+            "completed": true,
+            "size_bytes": 114845,
+            "sha256": "7738c46852e9bd0bf534fa2854de96b31189c234bc0ecd7a6651699ef38ea147"
+          },
+          {
+            "index": 45,
+            "duration_seconds": 4.28,
+            "url_fingerprint": "dc88ac1fb649a34211564ad33f32d9c4e79b1d78b1334ef12a48a3199f586f94",
+            "relative_path": "hls/gen-4/track-1/segment-00045.aac",
+            "completed": true,
+            "size_bytes": 69818,
+            "sha256": "c4b95280b1c10172e0d0e7b6b6d0532929ffb7dbe13e1c3b92cab5184c474b6d"
+          },
+          {
+            "index": 46,
+            "duration_seconds": 6.4,
+            "url_fingerprint": "f1b921c07bb56309f408e7b52f4b261a81e2e9f8256d13109a49c287170b25a7",
+            "relative_path": "hls/gen-4/track-1/segment-00046.aac",
+            "completed": true,
+            "size_bytes": 104533,
+            "sha256": "833a30015a2a0675dfc0ffee7cd6b061721987051196f9e2746998b90aafbc57"
+          },
+          {
+            "index": 47,
+            "duration_seconds": 5.12,
+            "url_fingerprint": "76f5bf4dd743cd829ea9aaff625aaa1963471285a9f7245d57789a74ba0d9172",
+            "relative_path": "hls/gen-4/track-1/segment-00047.aac",
+            "completed": true,
+            "size_bytes": 82841,
+            "sha256": "e539d7887445c6698db0148965d13f4835fb6cac88b80b203d2f1459877ab93c"
+          },
+          {
+            "index": 48,
+            "duration_seconds": 4.04,
+            "url_fingerprint": "a57c763babd478e14828d2cef7aadc46c84fcb2eb6ac80b225a8e85a7bf398c8",
+            "relative_path": "hls/gen-4/track-1/segment-00048.aac",
+            "completed": true,
+            "size_bytes": 66254,
+            "sha256": "c5e4ae6b92930da65e106cf88efceea58c82d563e07774f2186579ed3f524526"
+          },
+          {
+            "index": 49,
+            "duration_seconds": 5.36,
+            "url_fingerprint": "2e4eb1ad635ef7a4a70a4929a9377f777d9765fcc7dc295539b62d27a87fe8b3",
+            "relative_path": "hls/gen-4/track-1/segment-00049.aac",
+            "completed": true,
+            "size_bytes": 87153,
+            "sha256": "407e044b687cb729d143ac597b3202aebc9505d78363f21360f689c80138bc9c"
+          },
+          {
+            "index": 50,
+            "duration_seconds": 4.32,
+            "url_fingerprint": "30c91f6f29a916333d6deba0b25cdc3fe0df1b269f1eafe81013926ba57cfa04",
+            "relative_path": "hls/gen-4/track-1/segment-00050.aac",
+            "completed": true,
+            "size_bytes": 70836,
+            "sha256": "f2af1c32ab65ed34d807fc3954ec38c3cd5b124454d96c3d7e339a39b81741e1"
+          },
+          {
+            "index": 51,
+            "duration_seconds": 4.8,
+            "url_fingerprint": "15169723070b91b975ec3350eaf895b108e2c8e4756fea74dbb8ff45b13102af",
+            "relative_path": "hls/gen-4/track-1/segment-00051.aac",
+            "completed": true,
+            "size_bytes": 78068,
+            "sha256": "2c60c4918a526964e476399bbe7266082a22219949100517981943c29759da21"
+          }
+        ]
+      }
+    ]
+  },
+  "pre_commit": {
+    "staged_relative_path": "staged_output.mp4",
+    "final_size_bytes": 35332317,
+    "final_sha256": "39e06627edf585a8609e5a02f1e697a19cafd5befe41f72d45b8c2dab0a17e10"
+  },
+  "completed_at": "2026-09-27T14:01:20.20681Z"
+}
