@@ -2,6 +2,10 @@
 
 `goyt` is a native Go media extraction and download library with command-line tools for YouTube media retrieval, format planning, resilient downloads, and FFmpeg-backed remuxing and verification.
 
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ---
 
 ## Requirements
