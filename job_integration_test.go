@@ -332,8 +332,8 @@ func TestJobIntegration(t *testing.T) {
 		jobDir := filepath.Join(t.TempDir(), "job-tamper")
 		destFile := filepath.Join(t.TempDir(), "tamper-out.mp4")
 
-		h360 := 360
-		w640 := 640
+		h120 := 120
+		w160 := 160
 		mockMedia := &Media{
 			ID:        "tamper-id",
 			SourceURL: "https://www.youtube.com/watch?v=tamperid",
@@ -345,14 +345,14 @@ func TestJobIntegration(t *testing.T) {
 					Container:  "mp4",
 					VideoCodec: "avc1.42001E",
 					AudioCodec: "mp4a.40.2",
-					Height:     &h360,
-					Width:      &w640,
+					Height:     &h120,
+					Width:      &w160,
 					Resource:   Resource{URL: server.URL + "/video.mp4"},
 				},
 			},
 		}
 
-		plan, err := Plan(mockMedia, Selection{MaxHeight: 360, Container: "mp4"})
+		plan, err := Plan(mockMedia, Selection{MaxHeight: 120, Container: "mp4"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -690,6 +690,287 @@ func TestJobIntegration(t *testing.T) {
 		info, err := os.Stat(destFile)
 		if err != nil || info.Size() == 0 {
 			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+	})
+
+	t.Run("WebM persistent job with partial resume and verification", func(t *testing.T) {
+		hasVP9, _ := processor.HasEncoder(ctx, "libvpx-vp9")
+		hasOpus, _ := processor.HasEncoder(ctx, "libopus")
+		if !hasOpus {
+			hasOpus, _ = processor.HasEncoder(ctx, "opus")
+		}
+
+		if !hasVP9 || !hasOpus {
+			if os.Getenv("CI") != "" || os.Getenv("GOYT_REQUIRE_ALL_ENCODERS") != "" {
+				t.Fatalf("required VP9 or Opus encoder missing in CI environment")
+			}
+			t.Skip("VP9 or Opus encoder not available, skipping WebM persistent job test")
+		}
+
+		vp9File := filepath.Join(sourceDir, "test_vp9.webm")
+		opusFile := filepath.Join(sourceDir, "test_opus.webm")
+
+		runFFmpeg("-f", "lavfi", "-i", "color=c=green:s=160x120:r=25", "-t", "1", "-an", "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", vp9File)
+		runFFmpeg("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-vn", "-c:a", "libopus", "-f", "webm", opusFile)
+
+		vp9Data, err := os.ReadFile(vp9File)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opusData, err := os.ReadFile(opusFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var vp9Reqs, opusReqs atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/video.webm":
+				vp9Reqs.Add(1)
+				w.Header().Set("ETag", `"etag-vp9"`)
+				http.ServeContent(w, r, "video.webm", time.Now(), strings.NewReader(string(vp9Data)))
+			case "/audio.webm":
+				count := opusReqs.Add(1)
+				w.Header().Set("ETag", `"etag-opus"`)
+				if count == 1 {
+					// First attempt: send only first 50 bytes to test partial resume
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(opusData)))
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(opusData[:50])
+					return
+				}
+				http.ServeContent(w, r, "audio.webm", time.Now(), strings.NewReader(string(opusData)))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		jobDir := filepath.Join(t.TempDir(), "job-webm")
+		destFile := filepath.Join(t.TempDir(), "final-video.webm")
+
+		h120 := 120
+		w160 := 160
+		rate := int64(1000000)
+
+		mockMedia := &Media{
+			ID:        "webm-video-id",
+			SourceURL: "https://www.youtube.com/watch?v=webmvideoid",
+			Title:     "WebM Integration Video",
+			Formats: []Format{
+				{
+					ID:         "248",
+					Protocol:   ProtocolHTTP,
+					Container:  "webm",
+					VideoCodec: "vp09.00.41.08",
+					AudioCodec: "none",
+					Width:      &w160,
+					Height:     &h120,
+					Bitrate:    &rate,
+					Resource:   Resource{URL: server.URL + "/video.webm"},
+				},
+				{
+					ID:              "251",
+					Protocol:        ProtocolHTTP,
+					Container:       "webm",
+					VideoCodec:      "none",
+					AudioCodec:      "opus",
+					AudioTrackID:    "en-orig",
+					Language:        "en",
+					AudioIsOriginal: true,
+					AudioIsDefault:  true,
+					Bitrate:         &rate,
+					Resource:        Resource{URL: server.URL + "/audio.webm"},
+				},
+			},
+		}
+
+		plan, err := Plan(mockMedia, Selection{VideoCodec: "vp9", Container: "webm", AllowSeparate: true})
+		if err != nil {
+			t.Fatalf("failed to create plan: %v", err)
+		}
+
+		manifest, err := CreateVideoJob(
+			mockMedia.SourceURL,
+			mockMedia.ID,
+			mockMedia.Title,
+			nil,
+			destFile,
+			plan,
+			Selection{VideoCodec: "vp9", Container: "webm", AllowSeparate: true},
+			true,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Save(jobDir); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := JobRunnerOptions{
+			Extractor: func(ctx context.Context, u *url.URL) (*Media, error) {
+				return mockMedia, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 0,
+			},
+		}
+
+		// Run 1: Fails during audio download
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err == nil {
+			t.Fatal("expected error on run 1, got nil")
+		}
+
+		// Verify stream 0 (video) is marked completed and stream 1 (audio) is incomplete
+		savedManifest, err := LoadJobManifest(jobDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !savedManifest.Streams[0].Completed {
+			t.Fatal("expected stream 0 (video) to be completed")
+		}
+		if savedManifest.Streams[1].Completed {
+			t.Fatal("expected stream 1 (audio) to be incomplete")
+		}
+
+		// Run 2: Resumes and completes job
+		opts.Options.MaxRetries = 2
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error resuming WebM job: %v", err)
+		}
+
+		// Verify output exists and is valid WebM
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination output file missing or empty: %v", err)
+		}
+
+		dur := 1 * time.Second
+		vSpec := VideoVerificationSpec{
+			ExpectedContainer:  "webm",
+			ExpectedVideoCodec: "vp9",
+			ExpectedAudioCodec: "opus",
+			ExpectedWidth:      &w160,
+			ExpectedHeight:     &h120,
+		}
+		ver, err := verifier.VerifyVideo(ctx, destFile, vSpec, &dur)
+		if err != nil {
+			t.Fatalf("VerifyVideo on resumed WebM failed: %v", err)
+		}
+		if normalizeCodec(ver.VideoCodec) != "vp9" || normalizeCodec(ver.AudioCodec) != "opus" {
+			t.Fatalf("unexpected codecs: video=%s, audio=%s", ver.VideoCodec, ver.AudioCodec)
+		}
+
+		// Full decode check
+		if err := processor.CheckDecode(ctx, destFile); err != nil {
+			t.Fatalf("CheckDecode failed on resumed WebM: %v", err)
+		}
+
+		// Run 3: Completed job recognition
+		err = ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error on completed job re-run: %v", err)
+		}
+	})
+
+	t.Run("Old manifest backward compatibility", func(t *testing.T) {
+		jobDir := filepath.Join(t.TempDir(), "job-legacy")
+		destFile := filepath.Join(t.TempDir(), "final-legacy.mp4")
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("ETag", `"etag-muxed"`)
+			http.ServeContent(w, r, "muxed.mp4", time.Now(), strings.NewReader(string(muxedData)))
+		}))
+		defer server.Close()
+
+		if err := os.MkdirAll(jobDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+
+		// Write a legacy manifest JSON without new fields (e.g. output_container omitted, video_codec empty)
+		legacyJSON := fmt.Sprintf(`{
+			"schema_version": 1,
+			"job_id": "legacy-test-id",
+			"created_at": "2026-09-01T00:00:00Z",
+			"updated_at": "2026-09-01T00:00:00Z",
+			"source_url": "https://www.youtube.com/watch?v=legacyvid",
+			"video_id": "legacyvid",
+			"title": "Legacy Video",
+			"destination_path": %q,
+			"transport": "http",
+			"mode": "video",
+			"stage": "planned",
+			"selection": {
+				"max_height": 120,
+				"allow_separate": false
+			},
+			"decode_check": true,
+			"streams": [
+				{
+					"index": 0,
+					"format": {
+						"id": "18",
+						"protocol": "http",
+						"container": "mp4",
+						"video_codec": "avc1.42001E",
+						"audio_codec": "mp4a.40.2"
+					},
+					"relative_path": "inputs/stream-0.media",
+					"completed": false
+				}
+			]
+		}`, destFile)
+
+		if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(legacyJSON), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		mockMedia := &Media{
+			ID:        "legacyvid",
+			SourceURL: "https://www.youtube.com/watch?v=legacyvid",
+			Title:     "Legacy Video",
+			Formats: []Format{
+				{
+					ID:         "18",
+					Protocol:   ProtocolHTTP,
+					Container:  "mp4",
+					VideoCodec: "avc1.42001E",
+					AudioCodec: "mp4a.40.2",
+					Resource:   Resource{URL: server.URL + "/muxed.mp4"},
+				},
+			},
+		}
+
+		opts := JobRunnerOptions{
+			Extractor: func(ctx context.Context, u *url.URL) (*Media, error) {
+				return mockMedia, nil
+			},
+			Downloader: NewDownloader(server.Client()),
+			Processor:  processor,
+			Verifier:   verifier,
+			Options: DownloadOptions{
+				Resume:     true,
+				MaxRetries: 2,
+			},
+		}
+
+		err := ExecuteJob(ctx, jobDir, opts)
+		if err != nil {
+			t.Fatalf("unexpected error executing legacy manifest: %v", err)
+		}
+
+		info, err := os.Stat(destFile)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("destination file missing or empty: %v", err)
 		}
 	})
 }

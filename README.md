@@ -51,8 +51,20 @@ go test -race ./...
 Downloads a YouTube video using either direct HTTP streams or HLS transport in video (MP4) or audio-only mode:
 
 ```sh
-# Download video via direct HTTP streams (merges separate video and audio streams into MP4)
+# Download video via direct HTTP streams with specific codec and container (e.g. VP9 in WebM)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -video-codec vp9 -container webm
+
+# Download video via direct HTTP streams with AV1 in MKV container
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -video-codec av1 -container mkv
+
+# Download video via direct HTTP streams with AV1 in MP4 container (inferred from -out)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -video-codec av1 -out video.mp4
+
+# Download video via direct HTTP streams (merges separate video and audio streams into MP4 by default)
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport http -height 1080 -out video.mp4
+
+# Download video via HLS manifest with MKV container output
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -container mkv -out video.mkv
 
 # Download video via HLS manifest with full decode verification
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -height 1080 -out video.mp4 -decode-check
@@ -84,8 +96,8 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 # Download with CLI overall timeout disabled (only parent context applies)
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -timeout 0
 
-# Start a new persistent download job in ./my-job (HTTP)
-./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -job-dir ./my-job -out video.mp4
+# Start a new persistent download job in ./my-job (HTTP VP9 WebM)
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -video-codec vp9 -container webm -job-dir ./my-job
 
 # Start a new persistent HLS download job in ./hls-job with decode check
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -job-dir ./hls-job -out video.mp4 -decode-check
@@ -102,10 +114,16 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 
 **Flags:**
 - `-url`: YouTube video URL (required for new jobs; rejected with `-resume-job`).
+- `-video-codec`: Video codec: `h264`, `vp9`, or `av1` (default `h264`). Explicit selection is strict; no silent fallback to another codec occurs if unavailable. Rejected with `-audio-only`.
+- `-container`: Video output container: `mp4`, `webm`, or `mkv` (default `mp4`). Rejected with `-audio-only`.
+  - If `-container` is explicit, it is used.
+  - If only `-out` is explicit, the container is inferred from its extension (`.mp4`, `.webm`, `.mkv`).
+  - If both `-container` and `-out` are explicit, their container types must agree.
+  - If `-out` is omitted, defaults to `video.<container>`.
 - `-transport`: Download transport protocol: `http` or `hls` (default `http`). Persistent jobs support both `http` and `hls` transports for YouTube downloads.
 - `-job-dir`: Path to create a new persistent download job directory. Fails if the directory already exists.
 - `-resume-job`: Path to an existing persistent download job directory to resume. Source, selection, audio, and output flags are loaded from the job manifest and cannot be overridden.
-- `-audio-only`: Download audio without video. Defaults output format to `best` and output filename to `audio.<resolved_ext>` when `-out` is omitted.
+- `-audio-only`: Download audio without video. Defaults output format to `best` and output filename to `audio.<resolved_ext>` when `-out` is omitted. Explicitly supplied `-video-codec` or `-container` is rejected.
 - `-audio-format`: Output format for audio-only mode (default `best`). Supported formats: `best`, `aac`, `alac`, `flac`, `m4a`, `mp3`, `opus`, `vorbis`, `wav`. Only valid with `-audio-only`.
 - `-audio-quality`: MP3 VBR quality level, integer `0` (highest quality, ~245 kbps) to `9` (lowest quality, ~65 kbps), default `2` (~190 kbps). Lower values request higher quality. Only valid for `mp3` format with `-audio-only`. Mutually exclusive with `-audio-bitrate`.
 - `-audio-bitrate`: Target audio bitrate for lossy encoders (e.g. `128k`, `192k`, `320k`). Supported for `aac`, `m4a`, `mp3`, `opus`, and `vorbis`. Disallowed for `best`, `alac`, `flac`, and `wav`. Mutually exclusive with `-audio-quality`.
@@ -114,7 +132,7 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 - `-timeout`: Overall job timeout covering extraction, downloads, processing, and verification (default `30m`). Set to `0` to disable the CLI-imposed overall deadline. Resumed jobs receive a fresh deadline.
 - `-stall-timeout`: Network inactivity timeout per media request (default `60s`). Limits inactivity while waiting for response headers or receiving body bytes. Set to `0` to disable inactivity detection.
 - `-url-refreshes`: Maximum URL re-extraction attempts across the entire job on expired or forbidden media (default `1`, `0` disables). Resumed jobs receive a fresh refresh budget.
-- `-out`: Destination file path. In video mode, must have an `.mp4` extension (default `video.mp4`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
+- `-out`: Destination file path. In video mode, extension must match the container (`.mp4`, `.webm`, `.mkv`, default `video.<container>`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
 - `-version`: Print `goyt` version.
 
@@ -277,18 +295,48 @@ Downloads arbitrary HLS master or media playlists directly from a URL:
 - Selected public, non-live YouTube videos accessible without authentication.
 - Individual track URLs on `music.youtube.com` (`https://music.youtube.com/watch?v=VIDEO_ID`) for both video and audio downloads and stream inspection; album and playlist URLs remain unsupported.
 - Explicit selection of direct HTTP or HLS downloading.
-- H.264 video and AAC audio output in MP4 through the main YouTube CLI (video mode).
+- Explicit video codec selection (`h264`, `vp9`, `av1`) and output container selection (`mp4`, `webm`, `mkv`) for direct HTTP video downloads.
+- Multi-container output (`mp4`, `mkv`) for supported H.264/AAC HLS video downloads.
 - Multi-format audio-only downloads across 9 formats (audio-only mode).
-- Maximum-height selection from supported available formats in video mode; the requested
-  height is a ceiling, not a guaranteed output resolution.
-- Completed HLS playlists containing MPEG-TS or supported ID3-prefixed
-  packed AAC segments, including supported separate audio renditions.
+- Maximum-height selection from supported available formats in video mode; the requested height is a ceiling, not a guaranteed output resolution.
+- Completed HLS playlists containing MPEG-TS or supported ID3-prefixed packed AAC segments, including supported separate audio renditions.
 - In audio-only HLS mode, downloads only audio playlist manifests and audio segments without fetching video resources.
-- Metadata checks for expected stream codecs, stream counts, and duration.
+- Metadata checks for expected stream codecs, stream counts, dimensions, container, and duration.
 - Optional full audio/video decoding through the main YouTube CLI.
 
-YouTube extraction depends on behavior that can change. Successful extraction
-does not guarantee that every discovered media URL will accept downloads.
+YouTube extraction depends on behavior that can change. Successful extraction does not guarantee that every discovered media URL will accept downloads.
+
+## Video Selection & Containers
+
+### Supported Video Codec & Container Matrix
+
+`goyt` implements a centralized compatibility policy for video and audio stream combinations without video transcoding (all video downloads perform direct stream copy `-c copy`):
+
+| Container (`-container`) | Extension | Supported Video Codecs (`-video-codec`) | Supported Audio Codec | Notes & Scope |
+|---|---|---|---|---|
+| `mp4` (default) | `.mp4` | `h264` (default), `av1` | `aac` | Standard MP4 container with AAC audio. Supported across HTTP and HLS (HLS supports `h264`). |
+| `webm` | `.webm` | `vp9`, `av1` | `opus` | Matroska-based WebM container with Opus audio. Supported for direct HTTP downloads. |
+| `mkv` | `.mkv` | `h264`, `vp9`, `av1` | `opus` or `aac` | Matroska container supporting all video codecs with Opus or AAC audio. Supported across HTTP and HLS (HLS supports `h264`). |
+
+### Strict Codec Selection & Stream Copy
+- **No Video Transcoding**: `goyt` uses FFmpeg stream copy exclusively (`-c copy`) for video downloads. It never performs lossy video re-encoding or changes the requested video codec.
+- **Strict Requests**: If a requested video codec is not available in the source media or cannot be packaged into the requested container, `goyt` returns an actionable error immediately without silently falling back to a different codec.
+- **Audio Pairing for MKV**: MKV supports both Opus and AAC audio tracks. `goyt` selects audio by prioritizing:
+  1. Explicitly requested audio language (`-audio-language`).
+  2. Original audio tracks (heuristics/metadata markers).
+  3. Default audio tracks.
+  4. Deterministic audio codec preference: `opus` is preferred over `aac`.
+  5. Bitrate comparison only between identical audio codecs (avoiding misleading cross-codec bitrate comparisons).
+
+### HTTP vs. HLS Scope
+- **Direct HTTP**: Supports all 10 valid combinations across H.264, VP9, and AV1 video codecs and MP4, WebM, and MKV containers.
+- **HLS Downloads**: Supports H.264 video with AAC audio output as either `mp4` or `mkv`. Requests for `vp9` or `av1` video or `webm` container with HLS transport are rejected early with an explanation that it is a current HLS implementation limitation.
+
+### Player & Device Compatibility
+- Player and hardware support varies significantly across codecs and containers:
+  - **H.264 / MP4**: Broadest compatibility across virtually all operating systems, hardware decoders, browsers, and mobile devices (including Apple QuickTime and Safari).
+  - **VP9 / WebM & MKV**: Excellent compatibility with modern browsers (Chrome, Firefox, Edge), Android devices, and media players like VLC, mpv, and IINA; native playback in macOS QuickTime Player may be limited.
+  - **AV1**: State-of-the-art compression efficiency. Requires modern hardware with AV1 decode acceleration or sufficiently capable CPU decoding. Players like VLC, mpv, and modern browsers fully support AV1.
 
 ## Audio Selection & Formats
 
@@ -406,10 +454,12 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Writes manifests atomically via temporary file and rename (`0600` file permissions on supported systems).
   - Holds an OS-backed exclusive file lock (`flock` on Unix, `LockFileEx` on Windows) on `job.lock` for the entire process invocation. If another process attempts to open the same job, it fails immediately with `ErrJobLocked`. Locks automatically release on process exit or abnormal crash without relying on stale PID files.
 - **Resuming a Job (`-resume-job DIR`)**:
-  - Restores the YouTube source URL, video ID, transport, format selection constraints, audio settings, decode check preference, and absolute destination path directly from the manifest.
-  - Explicit specification of source, selection, audio, or output flags (`-url`, `-out`, `-height`, `-transport`, `-decode-check`, `-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`, `-audio-language`) is rejected rather than silently overriding stored job parameters.
+  - Restores the YouTube source URL, video ID, transport, video codec, output container, format selection constraints, audio settings, decode check preference, and absolute destination path directly from the manifest.
+  - Explicit specification of source, selection, codec, container, audio, or output flags (`-url`, `-out`, `-height`, `-video-codec`, `-container`, `-transport`, `-decode-check`, `-audio-only`, `-audio-format`, `-audio-quality`, `-audio-bitrate`, `-audio-language`) is rejected rather than silently overriding stored job parameters.
   - Operational parameters (`-timeout`, `-stall-timeout`, `-url-refreshes`) may be overridden on resume; otherwise, stored operational defaults apply.
   - Each resumed invocation receives a fresh overall deadline and fresh URL refresh budget.
+  - Completed-job recognition supports MP4, WebM, and MKV outputs.
+  - Legacy manifests without new container/codec fields are cleanly loaded and retain default H.264/AAC MP4 semantics.
   - On cancellation (e.g. Ctrl+C), execution halts promptly while retaining resumable partial and completed stream/segment state.
 - **Initial Execution & Duplicate Extraction Elimination**:
   - Newly created persistent jobs (`-job-dir DIR`) pass the freshly resolved presentation directly into initial execution in memory. Execution proceeds immediately without redundant network extraction or premature generation bumping.
@@ -426,7 +476,7 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - If a completed file's size or SHA-256 mismatches the manifest, it is safely re-downloaded from scratch.
 - **Incomplete Input Resume & Refresh**:
   - When incomplete streams or segments exist, `goyt` re-extracts fresh media URLs using the canonical video ID.
-  - Pinned format and variant matching ensures only the exact originally selected representation is matched. Best-format heuristics are never re-run.
+  - Pinned format and variant matching ensures only the exact originally selected representation is matched without switching codecs, containers, languages, or representations. Best-format heuristics are never re-run.
   - Safe same-resource strong-ETag and byte-range resumes continue where possible for HTTP streams.
 - **Runnable Resume Command**:
   - When a job is interrupted or fails, `goyt` prints a directly runnable command using the resolved executable binary path and absolute job directory with shell-appropriate argument quoting.
@@ -436,7 +486,7 @@ Use `-decode-check` to additionally decode the complete output with FFmpeg (vide
   - Output staging files are generated on the destination filesystem (or copied via temporary destination files) to prevent cross-device rename failures.
   - Pre-commit identity (final SHA-256 and byte size) is recorded before committing. If a crash occurs during destination rename, subsequent resume recognizes the committed output and completes cleanly.
   - Once committed to the destination, intermediate input and segment directories (`inputs/` and `hls/`) inside the job directory are deleted to free disk space, while retaining a lightweight completed manifest.
-  - Resuming a completed job verifies the final destination output identity (SHA-256 and size) and reports success without network requests. If the destination file was deleted or altered, resume returns a clear error (`ErrCompletedOutputMismatch`).
+  - Resuming a completed job verifies the final destination output identity (SHA-256 and size) across MP4, WebM, and MKV and reports success without network requests. If the destination file was deleted or altered, resume returns a clear error (`ErrCompletedOutputMismatch`).
 - **Security & Untrusted State**:
   - Manifest files and internal relative paths are validated against directory traversal, absolute paths, and symlinks. State is treated as untrusted input.
 
@@ -453,7 +503,7 @@ Run the local FFmpeg, executor, and persistent job integration tests:
 
 ```sh
 go test -race -tags=integration \
-  -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestJobIntegration|TestHLSJobIntegration)$' \
+  -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestVideoExecutorIntegration_AllCombinations|TestHLSVideoIntegration_MKV|TestDecodeFailurePreservesExistingDestination|TestJobIntegration|TestHLSJobIntegration)$' \
   -count=1 -v ./...
 ```
 

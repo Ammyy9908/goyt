@@ -14,11 +14,23 @@ import (
 	"time"
 )
 
+// VideoVerificationSpec specifies the expected attributes of a verified video file.
+type VideoVerificationSpec struct {
+	ExpectedContainer  string // "mp4", "webm", "mkv"
+	ExpectedVideoCodec string // "h264", "vp9", "av1"
+	ExpectedAudioCodec string // "aac", "opus" (empty accepts any compatible audio)
+	ExpectedWidth      *int
+	ExpectedHeight     *int
+}
+
 // Verification describes metadata observed in the completed file.
 type Verification struct {
 	Duration   time.Duration
 	VideoCodec string
 	AudioCodec string
+	Container  string
+	Width      int
+	Height     int
 }
 
 // AudioVerification describes audio metadata observed in the completed file.
@@ -49,16 +61,15 @@ func NewVerifier(path string) (*Verifier, error) {
 	}, nil
 }
 
-// VerifyMP4 checks the output expected by the current YouTube CLI:
-// one H.264 video stream, one AAC audio stream, and positive duration.
-//
-// If expected is supplied, duration must be within the larger of
-// two seconds or one percent of the expected duration.
-//
-// This checks metadata, not every encoded frame.
-func (v *Verifier) VerifyMP4(
+// VerifyVideo checks the video output against the VideoVerificationSpec:
+// exactly one video stream matching spec.ExpectedVideoCodec (and dimensions if supplied),
+// exactly one audio stream matching spec.ExpectedAudioCodec (if supplied),
+// the expected output container (accounting for ffprobe format-name aliases),
+// and duration within tolerance of expected duration.
+func (v *Verifier) VerifyVideo(
 	ctx context.Context,
 	path string,
+	spec VideoVerificationSpec,
 	expected *time.Duration,
 ) (*Verification, error) {
 	if err := ctx.Err(); err != nil {
@@ -105,7 +116,7 @@ func (v *Verifier) VerifyMP4(
 	args := []string{
 		"-v", "error",
 		"-show_entries",
-		"format=duration:stream=codec_type,codec_name,duration",
+		"format=duration,format_name:stream=codec_type,codec_name,duration,width,height",
 		"-of", "json",
 		"-o", probePath,
 		absolute,
@@ -132,11 +143,39 @@ func (v *Verifier) VerifyMP4(
 		return nil, err
 	}
 
-	return inspectProbeJSON(data, expected)
+	return inspectProbeJSONVideoSpec(data, spec, expected)
+}
+
+// VerifyMP4 checks the output expected by backward-compatible callers:
+// one H.264 video stream, one AAC audio stream, and positive duration in an MP4 container.
+func (v *Verifier) VerifyMP4(
+	ctx context.Context,
+	path string,
+	expected *time.Duration,
+) (*Verification, error) {
+	spec := VideoVerificationSpec{
+		ExpectedContainer:  "mp4",
+		ExpectedVideoCodec: "h264",
+		ExpectedAudioCodec: "aac",
+	}
+	return v.VerifyVideo(ctx, path, spec, expected)
 }
 
 func inspectProbeJSON(
 	data []byte,
+	expected *time.Duration,
+) (*Verification, error) {
+	spec := VideoVerificationSpec{
+		ExpectedContainer:  "mp4",
+		ExpectedVideoCodec: "h264",
+		ExpectedAudioCodec: "aac",
+	}
+	return inspectProbeJSONVideoSpec(data, spec, expected)
+}
+
+func inspectProbeJSONVideoSpec(
+	data []byte,
+	spec VideoVerificationSpec,
 	expected *time.Duration,
 ) (*Verification, error) {
 	var probe struct {
@@ -144,10 +183,13 @@ func inspectProbeJSON(
 			Type     string `json:"codec_type"`
 			Codec    string `json:"codec_name"`
 			Duration string `json:"duration"`
+			Width    int    `json:"width"`
+			Height   int    `json:"height"`
 		} `json:"streams"`
 
 		Format struct {
-			Duration string `json:"duration"`
+			Duration   string `json:"duration"`
+			FormatName string `json:"format_name"`
 		} `json:"format"`
 	}
 
@@ -160,24 +202,75 @@ func inspectProbeJSON(
 		return nil, err
 	}
 
+	if spec.ExpectedContainer != "" && probe.Format.FormatName != "" {
+		if !isMatchingContainer(probe.Format.FormatName, spec.ExpectedContainer) {
+			return nil, fmt.Errorf(
+				"goyt: expected %s container, got %q",
+				spec.ExpectedContainer,
+				probe.Format.FormatName,
+			)
+		}
+	}
+
 	var videoCount, audioCount int
+	var detectedVideoCodec, detectedAudioCodec string
+	var detectedWidth, detectedHeight int
 
 	for _, stream := range probe.Streams {
 		switch stream.Type {
 		case "video":
 			videoCount++
-			if stream.Codec != "h264" {
+			detectedVideoCodec = stream.Codec
+			detectedWidth = stream.Width
+			detectedHeight = stream.Height
+
+			expectedVideo := spec.ExpectedVideoCodec
+			if expectedVideo == "" {
+				expectedVideo = "h264"
+			}
+			if !isMatchingVideoCodec(stream.Codec, expectedVideo) {
 				return nil, fmt.Errorf(
-					"goyt: expected H.264 video, got %q",
+					"goyt: expected %s video, got %q",
+					normalizeCodec(expectedVideo),
 					stream.Codec,
 				)
 			}
 
+			if spec.ExpectedWidth != nil && *spec.ExpectedWidth > 0 {
+				if stream.Width != *spec.ExpectedWidth {
+					return nil, fmt.Errorf(
+						"goyt: expected video width %d, got %d",
+						*spec.ExpectedWidth,
+						stream.Width,
+					)
+				}
+			}
+
+			if spec.ExpectedHeight != nil && *spec.ExpectedHeight > 0 {
+				if stream.Height != *spec.ExpectedHeight {
+					return nil, fmt.Errorf(
+						"goyt: expected video height %d, got %d",
+						*spec.ExpectedHeight,
+						stream.Height,
+					)
+				}
+			}
+
 		case "audio":
 			audioCount++
-			if stream.Codec != "aac" {
+			detectedAudioCodec = stream.Codec
+
+			if spec.ExpectedAudioCodec != "" {
+				if !isMatchingAudioCodec(stream.Codec, spec.ExpectedAudioCodec) {
+					return nil, fmt.Errorf(
+						"goyt: expected %s audio, got %q",
+						normalizeCodec(spec.ExpectedAudioCodec),
+						stream.Codec,
+					)
+				}
+			} else if !knownAudio(stream.Codec) {
 				return nil, fmt.Errorf(
-					"goyt: expected AAC audio, got %q",
+					"goyt: unsupported audio codec %q",
 					stream.Codec,
 				)
 			}
@@ -217,9 +310,41 @@ func inspectProbeJSON(
 
 	return &Verification{
 		Duration:   time.Duration(seconds * float64(time.Second)),
-		VideoCodec: "h264",
-		AudioCodec: "aac",
+		VideoCodec: detectedVideoCodec,
+		AudioCodec: detectedAudioCodec,
+		Container:  probe.Format.FormatName,
+		Width:      detectedWidth,
+		Height:     detectedHeight,
 	}, nil
+}
+
+func isMatchingContainer(actualFormatName, expectedContainer string) bool {
+	expected := normalizeContainer(expectedContainer)
+	tokens := strings.Split(actualFormatName, ",")
+	for _, tok := range tokens {
+		tok = strings.TrimSpace(tok)
+		switch expected {
+		case "mp4":
+			if tok == "mp4" || tok == "mov" || tok == "m4a" || tok == "3gp" || tok == "3g2" || tok == "mj2" {
+				return true
+			}
+		case "webm":
+			if tok == "webm" || tok == "matroska" {
+				return true
+			}
+		case "mkv":
+			if tok == "matroska" || tok == "mkv" || tok == "webm" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isMatchingVideoCodec(actual, expected string) bool {
+	act := normalizeCodec(actual)
+	exp := normalizeCodec(expected)
+	return act == exp
 }
 
 // VerifyAudio checks the audio output against the AudioOutputSpec:
@@ -377,7 +502,7 @@ func inspectProbeJSONAudioSpec(
 			if !isMatchingAudioCodec(stream.Codec, expectedCodec) {
 				return nil, fmt.Errorf(
 					"goyt: expected %s audio, got %q",
-					expectedCodec,
+					normalizeCodec(expectedCodec),
 					stream.Codec,
 				)
 			}
@@ -427,16 +552,9 @@ func inspectProbeJSONAudioSpec(
 }
 
 func isMatchingAudioCodec(actual, expected string) bool {
-	act := strings.ToLower(strings.TrimSpace(actual))
-	exp := strings.ToLower(strings.TrimSpace(expected))
-	if act == exp {
-		return true
-	}
-	// PCM variant matching
-	if strings.HasPrefix(exp, "pcm_") && strings.HasPrefix(act, "pcm_") {
-		return act == exp
-	}
-	return false
+	act := normalizeCodec(actual)
+	exp := normalizeCodec(expected)
+	return act == exp
 }
 
 func parseMediaSeconds(value string) (float64, error) {

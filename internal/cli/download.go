@@ -26,8 +26,10 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		"audio language tag, e.g. en or en-US; empty uses playlist/media default",
 	)
 	source := flags.String("url", "", "YouTube video URL")
-	output := flags.String("out", "video.mp4", "output file path (default video.mp4, or audio.<ext> with -audio-only)")
+	output := flags.String("out", "video.mp4", "output file path (default video.<container>, or audio.<ext> with -audio-only)")
 	height := flags.Int("height", 1080, "maximum video height")
+	videoCodec := flags.String("video-codec", "h264", "video codec for video mode: h264, vp9, av1")
+	container := flags.String("container", "mp4", "output container for video mode: mp4, webm, mkv")
 	transport := flags.String("transport", "http", "transport protocol: http or hls")
 	decode := flags.Bool("decode-check", false, "decode the complete output after verification")
 	audioOnly := flags.Bool("audio-only", false, "download audio without video")
@@ -43,7 +45,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.mp4] [-decode-check]
+  goyt download -url URL [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
   goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
   goyt download -resume-job DIR [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
@@ -62,6 +64,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var (
 		heightSet, audioFormatSet, audioQualitySet, audioBitrateSet, outSet bool
 		urlSet, transportSet, decodeSet, audioOnlySet, audioLanguageSet     bool
+		videoCodecSet, containerSet                                         bool
 		jobDirSet, resumeJobSet                                             bool
 	)
 	flags.Visit(func(f *flag.Flag) {
@@ -72,6 +75,10 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			outSet = true
 		case "height":
 			heightSet = true
+		case "video-codec":
+			videoCodecSet = true
+		case "container":
+			containerSet = true
 		case "transport":
 			transportSet = true
 		case "decode-check":
@@ -125,6 +132,12 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 		if heightSet {
 			return errors.New("flag -height cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if videoCodecSet {
+			return errors.New("flag -video-codec cannot be specified with -resume-job (loaded from saved job)")
+		}
+		if containerSet {
+			return errors.New("flag -container cannot be specified with -resume-job (loaded from saved job)")
 		}
 		if transportSet {
 			return errors.New("flag -transport cannot be specified with -resume-job (loaded from saved job)")
@@ -231,10 +244,56 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if *audioLanguage != "" && *transport != "hls" {
 			return errors.New("-audio-language currently requires -transport hls")
 		}
-		if !strings.EqualFold(filepath.Ext(*output), ".mp4") {
-			return errors.New("this command requires an .mp4 output")
+
+		normVC, err := goyt.NormalizeVideoCodec(*videoCodec)
+		if err != nil {
+			return err
+		}
+		*videoCodec = normVC
+
+		if containerSet {
+			normC, err := goyt.NormalizeContainer(*container)
+			if err != nil {
+				return err
+			}
+			*container = normC
+		} else if outSet {
+			normC, err := goyt.NormalizeContainer(filepath.Ext(*output))
+			if err != nil {
+				return errors.New("this command requires an .mp4, .webm, or .mkv output")
+			}
+			*container = normC
+		} else {
+			*container = goyt.ContainerMP4
+		}
+
+		if containerSet && outSet {
+			extC, err := goyt.NormalizeContainer(filepath.Ext(*output))
+			if err != nil || extC != *container {
+				return fmt.Errorf("output extension %q does not match explicit container %q", filepath.Ext(*output), *container)
+			}
+		}
+
+		if !outSet {
+			*output = "video." + *container
+		}
+
+		if *transport == "hls" {
+			if *videoCodec != goyt.VideoCodecH264 {
+				return fmt.Errorf("HLS video download currently only supports H.264 video, got %q (VP9 and AV1 HLS downloads are not supported in this phase)", *videoCodec)
+			}
+			if *container == goyt.ContainerWebM {
+				return errors.New("HLS video download does not support WebM container (supported containers: mp4, mkv)")
+			}
+		}
+
+		if err := goyt.ValidateVideoCodecContainer(*videoCodec, *container); err != nil {
+			return err
 		}
 	} else {
+		if videoCodecSet || containerSet {
+			return errors.New("-video-codec and -container are not supported in -audio-only mode")
+		}
 		if heightSet {
 			return errors.New("-height is not supported in -audio-only mode")
 		}
@@ -446,7 +505,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 					MaxHeight:     *height,
 					VideoCodec:    "h264",
 					AudioCodec:    "aac",
-					Container:     "mp4",
+					Container:     *container,
 					AllowSeparate: true,
 					AudioLanguage: *audioLanguage,
 				}
@@ -514,9 +573,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintln(stdout, "Title:", media.Title)
 				videoSel := goyt.Selection{
 					MaxHeight:     *height,
-					VideoCodec:    "h264",
-					AudioCodec:    "aac",
-					Container:     "mp4",
+					VideoCodec:    *videoCodec,
+					Container:     *container,
 					AllowSeparate: true,
 				}
 				plan, err := goyt.Plan(media, videoSel)
@@ -578,6 +636,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	var saved string
 	var expected *time.Duration
 	var resolvedSpec goyt.AudioOutputSpec
+	var vSpec goyt.VideoVerificationSpec
 
 	options := goyt.DownloadOptions{
 		Resume:       true,
@@ -1073,9 +1132,8 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 		plan, err := goyt.Plan(media, goyt.Selection{
 			MaxHeight:     *height,
-			VideoCodec:    "h264",
-			AudioCodec:    "aac",
-			Container:     "mp4",
+			VideoCodec:    *videoCodec,
+			Container:     *container,
 			AllowSeparate: true,
 		})
 		if err != nil {
@@ -1085,7 +1143,36 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		originalStreams := append([]goyt.Format(nil), plan.Streams...)
 
 		for i, stream := range plan.Streams {
-			fmt.Fprintf(stdout, "Input %d: format %s\n", i+1, stream.ID)
+			if stream.VideoCodec != "" && stream.AudioCodec != "" && stream.AudioCodec != "none" {
+				fmt.Fprintf(stdout, "Input %d: format %s (video: %s, audio: %s)\n", i+1, stream.ID, stream.VideoCodec, stream.AudioCodec)
+			} else if stream.VideoCodec != "" && stream.VideoCodec != "none" {
+				fmt.Fprintf(stdout, "Input %d: format %s (video: %s)\n", i+1, stream.ID, stream.VideoCodec)
+			} else if stream.AudioCodec != "" && stream.AudioCodec != "none" {
+				fmt.Fprintf(stdout, "Input %d: format %s (audio: %s)\n", i+1, stream.ID, stream.AudioCodec)
+			} else {
+				fmt.Fprintf(stdout, "Input %d: format %s\n", i+1, stream.ID)
+			}
+		}
+		fmt.Fprintf(stdout, "Output container: %s\n", plan.OutputContainer)
+
+		var vCodec, aCodec string
+		var w, h *int
+		if len(plan.Streams) > 0 {
+			vCodec = plan.Streams[0].VideoCodec
+			w = plan.Streams[0].Width
+			h = plan.Streams[0].Height
+			if len(plan.Streams) > 1 {
+				aCodec = plan.Streams[1].AudioCodec
+			} else {
+				aCodec = plan.Streams[0].AudioCodec
+			}
+		}
+		vSpec = goyt.VideoVerificationSpec{
+			ExpectedContainer:  plan.OutputContainer,
+			ExpectedVideoCodec: vCodec,
+			ExpectedAudioCodec: aCodec,
+			ExpectedWidth:      w,
+			ExpectedHeight:     h,
 		}
 
 		executor, err := goyt.NewExecutor(
@@ -1139,7 +1226,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				continue
 			}
 
-			stagingFile, err := os.CreateTemp(filepath.Dir(targetPath), ".goyt-cli-staged-*.mp4")
+			stagingFile, err := os.CreateTemp(filepath.Dir(targetPath), ".goyt-cli-staged-*."+plan.OutputContainer)
 			if err != nil {
 				return err
 			}
@@ -1260,7 +1347,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				continue
 			}
 
-			stagingFile, err := os.CreateTemp(filepath.Dir(targetPath), ".goyt-cli-staged-*.mp4")
+			vSpec = goyt.VideoVerificationSpec{
+				ExpectedContainer:  *container,
+				ExpectedVideoCodec: "h264",
+				ExpectedAudioCodec: "aac",
+			}
+
+			stagingFile, err := os.CreateTemp(filepath.Dir(targetPath), ".goyt-cli-staged-*."+*container)
 			if err != nil {
 				return err
 			}
@@ -1409,7 +1502,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 
 	fmt.Fprintln(stdout, "Verifying output streams and duration...")
-	if _, err := verifier.VerifyMP4(ctx, saved, expected); err != nil {
+	if _, err := verifier.VerifyVideo(ctx, saved, vSpec, expected); err != nil {
 		return fmt.Errorf("verification failed; output retained: %w", err)
 	}
 

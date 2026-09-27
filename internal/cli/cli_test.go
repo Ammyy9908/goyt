@@ -160,9 +160,44 @@ func TestDownloadFlagValidation(t *testing.T) {
 			wantErr: "-audio-language currently requires -transport hls",
 		},
 		{
-			name:    "non mp4 output extension",
-			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-out", "video.mkv"},
-			wantErr: "this command requires an .mp4 output",
+			name:    "invalid output extension",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-out", "video.avi"},
+			wantErr: "this command requires an .mp4, .webm, or .mkv output",
+		},
+		{
+			name:    "unsupported video codec",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-video-codec", "prores"},
+			wantErr: "unsupported video codec \"prores\"",
+		},
+		{
+			name:    "unsupported container",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-container", "avi"},
+			wantErr: "unsupported container \"avi\"",
+		},
+		{
+			name:    "explicit container and output extension mismatch",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-container", "webm", "-out", "video.mp4"},
+			wantErr: "output extension \".mp4\" does not match explicit container \"webm\"",
+		},
+		{
+			name:    "incompatible video codec and container combination",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-video-codec", "vp9", "-container", "mp4"},
+			wantErr: "incompatible video codec \"vp9\" for container \"mp4\"",
+		},
+		{
+			name:    "hls rejects vp9 video codec",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-transport", "hls", "-video-codec", "vp9"},
+			wantErr: "HLS video download currently only supports H.264 video",
+		},
+		{
+			name:    "hls rejects av1 video codec",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-transport", "hls", "-video-codec", "av1"},
+			wantErr: "HLS video download currently only supports H.264 video",
+		},
+		{
+			name:    "hls rejects webm container",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-transport", "hls", "-container", "webm"},
+			wantErr: "HLS video download does not support WebM container",
 		},
 		{
 			name:    "unsupported youtube url",
@@ -437,6 +472,16 @@ func TestAudioOnlyCLIFlagValidation(t *testing.T) {
 			name:    "non-ogg output for vorbis mode",
 			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "vorbis", "-out", "song.mp3"},
 			wantErr: "audio-only vorbis mode requires a .ogg output",
+		},
+		{
+			name:    "video codec with audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-video-codec", "vp9"},
+			wantErr: "-video-codec and -container are not supported in -audio-only mode",
+		},
+		{
+			name:    "container with audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-container", "mkv"},
+			wantErr: "-video-codec and -container are not supported in -audio-only mode",
 		},
 		{
 			name:    "default height with audio-only is accepted up to URL validation",
@@ -1530,6 +1575,8 @@ func TestDownloadCLI_JobDir_FlagsValidation(t *testing.T) {
 			{"url", []string{"-url", "https://youtube.com/watch?v=123"}},
 			{"out", []string{"-out", "other.mp4"}},
 			{"height", []string{"-height", "720"}},
+			{"video-codec", []string{"-video-codec", "vp9"}},
+			{"container", []string{"-container", "webm"}},
 			{"transport", []string{"-transport", "http"}},
 			{"decode-check", []string{"-decode-check"}},
 			{"audio-only", []string{"-audio-only"}},
@@ -1588,7 +1635,7 @@ func TestDownloadCLI_PersistentJob_Lifecycle(t *testing.T) {
 	outFile := filepath.Join(tempDir, "cli-output.mp4")
 	sourceMP4 := filepath.Join(tempDir, "source.mp4")
 
-	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=160x120:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
 	if err := cmd.Run(); err != nil {
 		t.Skip("ffmpeg not available for CLI test:", err)
 	}

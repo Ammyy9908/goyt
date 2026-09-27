@@ -21,10 +21,10 @@ func MatchRefreshedFormat(original Format, candidates []Format) (*Format, error)
 		if normalizeContainer(f.Container) != normalizeContainer(original.Container) {
 			continue
 		}
-		if normalizeCodec(f.VideoCodec) != normalizeCodec(original.VideoCodec) {
+		if !strings.EqualFold(strings.TrimSpace(f.VideoCodec), strings.TrimSpace(original.VideoCodec)) {
 			continue
 		}
-		if normalizeCodec(f.AudioCodec) != normalizeCodec(original.AudioCodec) {
+		if !strings.EqualFold(strings.TrimSpace(f.AudioCodec), strings.TrimSpace(original.AudioCodec)) {
 			continue
 		}
 		if original.Height != nil {

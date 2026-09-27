@@ -2,6 +2,7 @@ package goyt
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -29,6 +30,99 @@ type Selection struct {
 	AllowSeparate bool
 }
 
+// Video Codec constants
+const (
+	VideoCodecH264 = "h264"
+	VideoCodecVP9  = "vp9"
+	VideoCodecAV1  = "av1"
+)
+
+// Container constants
+const (
+	ContainerMP4  = "mp4"
+	ContainerWebM = "webm"
+	ContainerMKV  = "mkv"
+)
+
+// SupportedVideoCodecs returns the list of video codecs supported by goyt.
+func SupportedVideoCodecs() []string {
+	return []string{VideoCodecH264, VideoCodecVP9, VideoCodecAV1}
+}
+
+// SupportedVideoContainers returns the list of output containers supported for video.
+func SupportedVideoContainers() []string {
+	return []string{ContainerMP4, ContainerWebM, ContainerMKV}
+}
+
+// NormalizeVideoCodec normalizes a video codec string or family name (e.g. avc1, vp09, av01)
+// to its canonical name ("h264", "vp9", "av1").
+func NormalizeVideoCodec(value string) (string, error) {
+	norm := normalizeCodec(value)
+	switch norm {
+	case VideoCodecH264, VideoCodecVP9, VideoCodecAV1:
+		return norm, nil
+	default:
+		return "", fmt.Errorf("unsupported video codec %q; supported codecs are %s", value, strings.Join(SupportedVideoCodecs(), ", "))
+	}
+}
+
+// NormalizeAudioCodec normalizes an audio codec string to canonical names ("aac", "opus").
+func NormalizeAudioCodec(value string) (string, error) {
+	norm := normalizeCodec(value)
+	switch norm {
+	case "aac", "opus":
+		return norm, nil
+	default:
+		return "", fmt.Errorf("unsupported audio codec %q; supported codecs are aac, opus", value)
+	}
+}
+
+// NormalizeContainer normalizes an output container name or file extension (e.g. .mp4, matroska)
+// to its canonical name ("mp4", "webm", "mkv").
+func NormalizeContainer(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimPrefix(value, ".")
+
+	if value == "matroska" {
+		return ContainerMKV, nil
+	}
+
+	switch value {
+	case ContainerMP4, ContainerWebM, ContainerMKV:
+		return value, nil
+	default:
+		return "", fmt.Errorf("unsupported container %q; supported containers are %s", value, strings.Join(SupportedVideoContainers(), ", "))
+	}
+}
+
+// ValidateVideoCodecContainer validates that a video codec and container combination is supported by goyt's policy.
+func ValidateVideoCodecContainer(videoCodec, container string) error {
+	v, err := NormalizeVideoCodec(videoCodec)
+	if err != nil {
+		return err
+	}
+	c, err := NormalizeContainer(container)
+	if err != nil {
+		return err
+	}
+
+	switch c {
+	case ContainerMP4:
+		if v != VideoCodecH264 && v != VideoCodecAV1 {
+			return fmt.Errorf("incompatible video codec %q for container %q (supported: h264, av1 for mp4)", videoCodec, container)
+		}
+	case ContainerWebM:
+		if v != VideoCodecVP9 && v != VideoCodecAV1 {
+			return fmt.Errorf("incompatible video codec %q for container %q (supported: vp9, av1 for webm)", videoCodec, container)
+		}
+	case ContainerMKV:
+		if v != VideoCodecH264 && v != VideoCodecVP9 && v != VideoCodecAV1 {
+			return fmt.Errorf("incompatible video codec %q for container %q (supported: h264, vp9, av1 for mkv)", videoCodec, container)
+		}
+	}
+	return nil
+}
+
 func normalizeCodec(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 
@@ -43,8 +137,18 @@ func normalizeCodec(value string) string {
 	case value == "aac",
 		value == "mp4a.40.2",
 		value == "mp4a.40.5",
-		value == "mp4a.40.29":
+		value == "mp4a.40.29",
+		value == "mp4a.40.1",
+		value == "mp4a.40.3",
+		value == "mp4a.40.4",
+		value == "mp4a.40.6",
+		value == "mp4a.66",
+		value == "mp4a.67",
+		value == "mp4a.68":
 		return "aac"
+
+	case value == "opus":
+		return "opus"
 
 	case value == "vp8",
 		value == "vp08",
@@ -53,12 +157,14 @@ func normalizeCodec(value string) string {
 
 	case value == "vp9",
 		value == "vp09",
-		strings.HasPrefix(value, "vp09."):
+		strings.HasPrefix(value, "vp09."),
+		strings.HasPrefix(value, "vp9."):
 		return "vp9"
 
 	case value == "av1",
 		value == "av01",
-		strings.HasPrefix(value, "av01."):
+		strings.HasPrefix(value, "av01."),
+		strings.HasPrefix(value, "av1."):
 		return "av1"
 
 	default:
@@ -68,6 +174,7 @@ func normalizeCodec(value string) string {
 
 func normalizeContainer(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimPrefix(value, ".")
 
 	if value == "matroska" {
 		return "mkv"
@@ -78,7 +185,7 @@ func normalizeContainer(value string) string {
 
 func knownVideo(codec string) bool {
 	switch normalizeCodec(codec) {
-	case "h264", "vp8", "vp9", "av1":
+	case "h264", "vp9", "av1":
 		return true
 	default:
 		return false
@@ -87,29 +194,31 @@ func knownVideo(codec string) bool {
 
 func knownAudio(codec string) bool {
 	switch normalizeCodec(codec) {
-	case "aac", "opus", "vorbis":
+	case "aac", "opus":
 		return true
 	default:
 		return false
 	}
 }
 
-// This intentionally models a small compatibility subset.
-// Expand it with explicit tests when adding more codecs.
+// compatible checks goyt's centralized supported codec/container compatibility policy:
+// - MP4: H.264 or AV1 video with AAC audio.
+// - WebM: VP9 or AV1 video with Opus audio.
+// - MKV: H.264, VP9, or AV1 video with AAC or Opus audio.
 func compatible(container, video, audio string) bool {
-	video = normalizeCodec(video)
-	audio = normalizeCodec(audio)
+	v := normalizeCodec(video)
+	a := normalizeCodec(audio)
+	c := normalizeContainer(container)
 
-	switch normalizeContainer(container) {
+	switch c {
 	case "mp4":
-		return video == "h264" && audio == "aac"
+		return (v == "h264" || v == "av1") && a == "aac"
 
 	case "webm":
-		return (video == "vp8" || video == "vp9" || video == "av1") &&
-			(audio == "opus" || audio == "vorbis")
+		return (v == "vp9" || v == "av1") && a == "opus"
 
 	case "mkv":
-		return knownVideo(video) && knownAudio(audio)
+		return (v == "h264" || v == "vp9" || v == "av1") && (a == "aac" || a == "opus")
 
 	default:
 		return false
@@ -121,23 +230,36 @@ func normalizeSelection(s Selection) (Selection, error) {
 		return Selection{}, errors.New("goyt: MaxHeight cannot be negative")
 	}
 
-	s.VideoCodec = normalizeCodec(s.VideoCodec)
-	s.AudioCodec = normalizeCodec(s.AudioCodec)
-	s.Container = normalizeContainer(s.Container)
+	if s.VideoCodec != "" {
+		normVC, err := NormalizeVideoCodec(s.VideoCodec)
+		if err != nil {
+			return Selection{}, errors.New("goyt: unsupported video codec requirement")
+		}
+		s.VideoCodec = normVC
+	}
+
+	if s.AudioCodec != "" {
+		normAC, err := NormalizeAudioCodec(s.AudioCodec)
+		if err != nil {
+			return Selection{}, errors.New("goyt: unsupported audio codec requirement")
+		}
+		s.AudioCodec = normAC
+	}
+
+	if s.Container != "" {
+		normC, err := NormalizeContainer(s.Container)
+		if err != nil {
+			return Selection{}, errors.New("goyt: unsupported output container")
+		}
+		s.Container = normC
+	}
+
 	s.AudioLanguage = strings.ToLower(strings.TrimSpace(s.AudioLanguage))
 
-	if s.VideoCodec != "" && !knownVideo(s.VideoCodec) {
-		return Selection{}, errors.New("goyt: unsupported video codec requirement")
-	}
-
-	if s.AudioCodec != "" && !knownAudio(s.AudioCodec) {
-		return Selection{}, errors.New("goyt: unsupported audio codec requirement")
-	}
-
-	switch s.Container {
-	case "", "mp4", "webm", "mkv":
-	default:
-		return Selection{}, errors.New("goyt: unsupported output container")
+	if s.VideoCodec != "" && s.Container != "" {
+		if err := ValidateVideoCodecContainer(s.VideoCodec, s.Container); err != nil {
+			return Selection{}, err
+		}
 	}
 
 	return s, nil

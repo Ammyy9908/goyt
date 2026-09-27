@@ -964,8 +964,59 @@ func verifyAndCommitJob(ctx context.Context, jobDir string, manifest *JobManifes
 			fmt.Fprintln(opts.Stdout, "Full audio decode check passed.")
 		}
 	} else {
+		container := normalizeContainer(manifest.OutputContainer)
+		if container == "" {
+			container = normalizeContainer(filepath.Ext(manifest.DestinationPath))
+			if container == "" {
+				container = ContainerMP4
+			}
+		}
+
+		var videoCodec, audioCodec string
+		var width, height *int
+
+		if manifest.Transport == "hls" {
+			videoCodec = "h264"
+			audioCodec = "aac"
+		} else {
+			if len(manifest.Streams) > 0 {
+				videoCodec = normalizeCodec(manifest.Streams[0].Format.VideoCodec)
+				width = manifest.Streams[0].Format.Width
+				height = manifest.Streams[0].Format.Height
+				if len(manifest.Streams) > 1 {
+					audioCodec = normalizeCodec(manifest.Streams[1].Format.AudioCodec)
+				} else {
+					audioCodec = normalizeCodec(manifest.Streams[0].Format.AudioCodec)
+				}
+			}
+			if videoCodec == "" {
+				videoCodec = normalizeCodec(manifest.Selection.VideoCodec)
+			}
+			if videoCodec == "" {
+				videoCodec = "h264"
+			}
+			if audioCodec == "" {
+				audioCodec = normalizeCodec(manifest.Selection.AudioCodec)
+			}
+			if audioCodec == "" {
+				if container == ContainerWebM {
+					audioCodec = "opus"
+				} else {
+					audioCodec = "aac"
+				}
+			}
+		}
+
+		vSpec := VideoVerificationSpec{
+			ExpectedContainer:  container,
+			ExpectedVideoCodec: videoCodec,
+			ExpectedAudioCodec: audioCodec,
+			ExpectedWidth:      width,
+			ExpectedHeight:     height,
+		}
+
 		fmt.Fprintln(opts.Stdout, "Verifying output streams and duration...")
-		if _, err := opts.Verifier.VerifyMP4(ctx, stagedPath, expectedDuration); err != nil {
+		if _, err := opts.Verifier.VerifyVideo(ctx, stagedPath, vSpec, expectedDuration); err != nil {
 			return fmt.Errorf("verification failed; output retained: %w", err)
 		}
 		if manifest.DecodeCheck {

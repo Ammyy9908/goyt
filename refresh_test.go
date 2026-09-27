@@ -182,6 +182,28 @@ func TestMatchRefreshedFormat(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects same-family different video codec profile string", func(t *testing.T) {
+		differentProfile := origVideo
+		differentProfile.VideoCodec = "avc1.42001E" // both are H.264 family, but exact string differs from avc1.640028
+		candidates := []Format{differentProfile}
+
+		_, err := MatchRefreshedFormat(origVideo, candidates)
+		if err == nil {
+			t.Fatal("expected error for different video codec string, got nil")
+		}
+	})
+
+	t.Run("rejects same-family different audio codec profile string", func(t *testing.T) {
+		differentAudioCodec := origAudio
+		differentAudioCodec.AudioCodec = "mp4a.40.5" // both are AAC family, but exact string differs from mp4a.40.2
+		candidates := []Format{differentAudioCodec}
+
+		_, err := MatchRefreshedFormat(origAudio, candidates)
+		if err == nil {
+			t.Fatal("expected error for different audio codec string, got nil")
+		}
+	})
+
 	t.Run("rejects dimension mismatch", func(t *testing.T) {
 		mismatchedDim := origVideo
 		mismatchedDim.Height = &h720

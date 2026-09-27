@@ -2,7 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Explicit video codec selection (`-video-codec h264|vp9|av1`, default `h264`) and output container selection (`-container mp4|webm|mkv`, default `mp4`) in `goyt download`.
+- Centralized codec and container compatibility policy shared across CLI validation, format planning, FFmpeg processing, and output verification:
+  - `mp4`: H.264 or AV1 video with AAC audio.
+  - `webm`: VP9 or AV1 video with Opus audio.
+  - `mkv`: H.264, VP9, or AV1 video with Opus or AAC audio.
+- Strict codec selection without silent fallback: requests for unavailable video codecs fail with clear, actionable errors.
+- Automatic container inference from output file extension (`-out`) when `-container` is omitted, with strict validation requiring `-container` and `-out` extensions to agree when both are explicit.
+- Multi-container output support (`mp4` and `mkv`) for supported H.264/AAC HLS video downloads, with early rejection of VP9/AV1 and WebM HLS requests clarifying current HLS implementation scope.
+- Stream copy remuxing (`-c copy`) exclusively for all video downloads without video transcoding.
+- Deterministic audio selection for MKV prioritizing original and default audio tracks, ranking Opus over AAC, and restricting bitrate comparisons to identical audio codecs.
+- Generalized video verification (`VerifyVideo` / `VideoVerificationSpec`) supporting all 10 valid combinations with container alias matching, codec family verification, stream counts, dimensions, and duration tolerances.
+- Backward-compatible persistent job support for WebM and MKV containers, preserving selected video codec, output container, and exact stream identities across resumes.
+- Completed-job recognition supporting MP4, WebM, and MKV outputs.
+- Comprehensive unit and integration test suites covering all supported codec/container combinations, container inference, invalid/conflicting flag rejections, MKV audio ranking, full decode checks, and persistent resume for WebM and legacy manifests.
+
 ### Fixed
+
+- Fixed codec normalization in generalized video verification (`VerifyVideo`, `isMatchingAudioCodec`, and `isMatchingVideoCodec`) to normalize both expected source codec identifiers (e.g. `mp4a.40.2`, `av01.0.05m.08`, `avc1.640028`, `vp09.00.41.08`) and observed `ffprobe` codec names to their canonical families (`aac`, `av1`, `h264`, `vp9`) before comparison, resolving verification errors on AV1/H.264/VP9 downloads with source audio identifiers while preserving exact codec strings for pinned representation matching and URL refresh.
 
 - Eliminated duplicate initial extraction on new persistent jobs (`-job-dir`) for both HLS and HTTP transports by passing the freshly resolved in-memory presentation directly into initial job execution, preventing redundant network extraction requests and avoiding immediate spurious generation bumps to `gen-2` before downloading begins.
 - Fixed persistent job resume instructions to print directly runnable shell commands formatting the resolved executable binary path (via `os.Executable()`, symlink resolution, and argument quoting) and absolute job directory path safely across POSIX and Windows shells, including paths containing spaces and quotes.

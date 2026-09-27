@@ -504,6 +504,15 @@ func CreateHLSVideoJob(
 		})
 	}
 
+	outputContainer := selection.Container
+	if outputContainer == "" {
+		if ext := strings.ToLower(filepath.Ext(absDest)); ext == ".mkv" {
+			outputContainer = ContainerMKV
+		} else {
+			outputContainer = ContainerMP4
+		}
+	}
+
 	now := time.Now().UTC()
 	return &JobManifest{
 		SchemaVersion:   1,
@@ -526,7 +535,7 @@ func CreateHLSVideoJob(
 			AllowSeparate: selection.AllowSeparate,
 			AudioLanguage: selection.AudioLanguage,
 		},
-		OutputContainer: "mp4",
+		OutputContainer: outputContainer,
 		DecodeCheck:     decodeCheck,
 		HLS: &JobHLSState{
 			Generation:      1,

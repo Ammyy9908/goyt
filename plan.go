@@ -171,16 +171,65 @@ func betterPlan(candidate, current *DownloadPlan) bool {
 	}
 
 	if candidate.NeedsMerge {
-		candidateAudioRate := formatBitrate(candidate.Streams[1])
-		currentAudioRate := formatBitrate(current.Streams[1])
-
-		if candidateAudioRate != currentAudioRate {
-			return candidateAudioRate > currentAudioRate
+		if better, decided := betterAudio(candidate.Streams[1], current.Streams[1]); decided {
+			return better
+		}
+	} else {
+		if better, decided := betterAudio(candidate.Streams[0], current.Streams[0]); decided {
+			return better
 		}
 	}
 
 	// Preserve the first candidate when all ranking factors are equal.
 	return false
+}
+
+// betterAudio compares two audio formats using deterministic criteria:
+// 1. AudioIsOriginal preference.
+// 2. AudioIsDefault preference.
+// 3. Audio codec rank (Opus > AAC). Different audio codecs are never ranked solely by bitrate.
+// 4. Bitrate comparison within the same audio codec.
+func betterAudio(candidate, current Format) (better bool, decided bool) {
+	if candidate.AudioIsOriginal != current.AudioIsOriginal {
+		return candidate.AudioIsOriginal, true
+	}
+
+	if candidate.AudioIsDefault != current.AudioIsDefault {
+		return candidate.AudioIsDefault, true
+	}
+
+	candCodec := normalizeCodec(candidate.AudioCodec)
+	currCodec := normalizeCodec(current.AudioCodec)
+
+	if candCodec != currCodec {
+		candRank := audioCodecRank(candCodec)
+		currRank := audioCodecRank(currCodec)
+		if candRank != currRank {
+			return candRank > currRank, true
+		}
+	}
+
+	candRate := formatBitrate(candidate)
+	currRate := formatBitrate(current)
+
+	if candRate != currRate {
+		return candRate > currRate, true
+	}
+
+	return false, false
+}
+
+// audioCodecRank provides a deterministic ranking across different audio codecs.
+// Opus is ranked above AAC due to higher encoding efficiency at equal bitrates.
+func audioCodecRank(codec string) int {
+	switch normalizeCodec(codec) {
+	case "opus":
+		return 2
+	case "aac":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func formatHeight(f Format) int {
