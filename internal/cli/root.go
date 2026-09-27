@@ -51,7 +51,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Usage:
   goyt download -url URL [-transport http|hls] [-height 1080] [-audio-language LANG] [-out video.mp4] [-decode-check]
   goyt download -url URL -audio-only [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-out audio.<ext>] [-decode-check]
-  goyt inspect -url URL [-client web|visionos|all]
+  goyt inspect -url URL [-client web|visionos|all] [-json]
   goyt hls -url PLAYLIST_URL [-height 1080] [-out hls.mp4]
   goyt -version
   goyt -help

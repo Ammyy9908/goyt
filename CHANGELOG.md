@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Machine-readable JSON output for `goyt inspect` via the `-json` flag (`goyt inspect -url URL [-client web|visionos|all] -json`).
+- Versioned inspect output schema (`schema_version: 1`) with explicit snake_case DTOs for safe, stable downstream consumption.
+- Normalized duration in seconds (`duration_seconds`), sorted unique video heights (`available_video_heights`), and honest original-audio heuristics (`original_hint`).
+- Strict allowlist filtering ensuring signed media/manifest URLs, cookies, authorization headers, visitor identifiers, and raw API responses are excluded from JSON output.
+- Structured per-client error reporting with safe error codes (`context_canceled`, `timeout`, `player_response_missing`, `extraction_failed`), preserving partial successful results under `-client all`.
+
 ## [0.1.0-rc.4] - 2026-09-27
 
 ### Added

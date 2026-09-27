@@ -94,19 +94,119 @@ The legacy shorthand format without a subcommand is fully preserved:
 
 ### 2. `goyt inspect` (Diagnostic Inspector)
 
-Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signature/N-parameter challenge requirements, player audio tracks, HLS renditions, and client profile responses:
+Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signature/N-parameter challenge requirements, player audio tracks, HLS renditions, and client profile responses in human-readable table or structured machine-readable JSON format:
 
 ```sh
-# Inspect using default (all) client profiles:
+# Inspect using default (all) client profiles (human-readable tables):
 ./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID"
 
 # Inspect specific client profile (web or visionos):
 ./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client visionos
+
+# Inspect in machine-readable JSON format (visionos client):
+./bin/goyt inspect -url "https://youtu.be/VIDEO_ID" -client visionos -json > info.json
+
+# Inspect YouTube Music track URL with JSON output:
+./bin/goyt inspect -url "https://music.youtube.com/watch?v=VIDEO_ID" -json
+
+# Inspect all client profiles with JSON output:
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client all -json
 ```
 
 **Flags:**
-- `-url`: Public YouTube video URL (required).
+- `-url`: Public YouTube video or YouTube Music track URL (required).
 - `-client`: Client response to inspect: `web`, `visionos`, or `all` (default `all`).
+- `-json`: Emit stable, machine-readable JSON output to stdout.
+
+#### Machine-Readable JSON Output (`-json`)
+
+When `-json` is specified:
+- `stdout` contains **exactly one valid JSON document followed by a newline**. No headings, table formatting, progress messages, or trailing errors are emitted to `stdout`.
+- Operational diagnostics and error messages are written exclusively to `stderr`.
+- Network requests are never duplicated; inspection results are reused.
+- FFmpeg is not required and no media segments are downloaded during inspection.
+
+##### Schema Specification (Version 1)
+
+Top-level structure:
+```json
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "client": "visionos",
+      "status": "ok",
+      "media": {
+        "id": "VIDEO_ID",
+        "title": "Example Video Title",
+        "duration_seconds": 262.0
+      },
+      "playback": {
+        "status": "OK",
+        "reason": null
+      },
+      "streaming": {
+        "hls": true,
+        "dash": false,
+        "sabr": true
+      },
+      "available_video_heights": [144, 240, 360, 480, 720, 1080],
+      "formats": [
+        {
+          "id": 137,
+          "mime_type": "video/mp4",
+          "codecs": "avc1.640028",
+          "quality": "1080p",
+          "width": 1920,
+          "height": 1080,
+          "bitrate": 4500000,
+          "has_direct_url": false,
+          "signature_challenge": true,
+          "n_challenge": true,
+          "drm_reported": false
+        }
+      ],
+      "audio_tracks": [
+        {
+          "id": "en.4",
+          "name": "English (original)",
+          "language": null,
+          "default": true,
+          "original_hint": true
+        }
+      ],
+      "hls_audio_renditions": [
+        {
+          "group_id": "audio",
+          "name": "English (original)",
+          "language": "en",
+          "default": true,
+          "autoselect": true,
+          "original_hint": true
+        }
+      ],
+      "limitations": [
+        "Discovered URLs have not been verified for playback or downloading."
+      ],
+      "error": null
+    }
+  ]
+}
+```
+
+##### Field Semantics & Rules
+- **Units**: Durations are represented in floating-point seconds (`duration_seconds`), not nanoseconds.
+- **Null Semantics**: Unknown numeric values (`width`, `height`, `bitrate`, `duration_seconds`) and unavailable string fields (`reason`, `codecs`, `quality`, `language`) use `null` rather than misleading zeroes or empty strings.
+- **Collection Semantics**: Lists (`results`, `available_video_heights`, `formats`, `audio_tracks`, `hls_audio_renditions`, `limitations`) always marshal as empty arrays `[]`, never `null`.
+- **`available_video_heights`**: Array of positive, unique video heights sorted in ascending order. These heights describe discovered formats in the player response, **not guaranteed downloadable or CLI-supported resolutions**.
+- **Format Ordering**: Format entries preserve the discovery order from the player response; duplicate format IDs (e.g., adaptive formats associated with different audio tracks) are preserved deterministically.
+- **Original-Audio Heuristic**: The `original_hint` boolean reflects the existing heuristic (e.g. rendition name containing `(original)` or track ID containing `original`) with documented provenance; it does not represent verified creator provenance. If language metadata is not exposed by YouTube, `language` is left as `null` without guessing from display names.
+- **Exclusion of Sensitive Data**: JSON output uses an explicit field allowlist. It never emits signed media/manifest URLs, session cookies, authorization headers, visitor data identifiers (`VISITOR_DATA` / `X-Goog-Visitor-Id`), PO tokens, or raw API response payloads.
+- **Errors & Exit Codes**:
+  - If a requested client fails extraction, `status` is set to `"error"` with a structured `error` object (`code` and `message`), while successful client results in `-client all` mode are fully preserved.
+  - If any requested client fails extraction, `goyt inspect` exits with a non-zero exit code.
+  - A restricted playback response (e.g., `LOGIN_REQUIRED` or `UNPLAYABLE`) is an inspected response returned with `status: "ok"` and `playback.status: "LOGIN_REQUIRED"`; it does not cause a non-zero exit code.
+  - CLI argument parsing errors are printed to `stderr` with a non-zero exit code and emit no stdout output.
 
 ### 3. `goyt hls` (Direct HLS Playlist Downloader)
 

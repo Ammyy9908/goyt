@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,10 +24,15 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		"all",
 		"response to inspect: web, visionos, or all",
 	)
+	jsonOutput := flags.Bool(
+		"json",
+		false,
+		"emit machine-readable JSON output",
+	)
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt inspect -url YOUTUBE_URL [options]
-  goyt inspect -url YOUTUBE_URL [-client web|visionos|all]
+  goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-json]
   goyt inspect -help`)
 		flags.PrintDefaults()
 	}
@@ -37,7 +43,7 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 
 	if *source == "" || flags.NArg() != 0 {
 		flags.Usage()
-		return errors.New("usage: goyt inspect -url YOUTUBE_URL [-client web|visionos|all]")
+		return errors.New("usage: goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-json]")
 	}
 
 	switch *clientName {
@@ -64,6 +70,7 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		clients = []string{"web", "visionos"}
 	}
 
+	var results []youtube.ClientInspectResult
 	var failures []error
 
 	for _, name := range clients {
@@ -75,16 +82,35 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			report, err = extractor.InspectVisionOS(ctx, u)
 		}
 
-		fmt.Fprintf(stdout, "\n=== %s ===\n", name)
+		if *jsonOutput {
+			results = append(results, youtube.BuildClientInspectResult(name, report, err))
+			if err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			}
+		} else {
+			fmt.Fprintf(stdout, "\n=== %s ===\n", name)
 
-		if err != nil {
-			fmt.Fprintf(stdout, "Inspection failed: %v\n", err)
-			failures = append(failures, fmt.Errorf("%s: %w", name, err))
-			continue
+			if err != nil {
+				fmt.Fprintf(stdout, "Inspection failed: %v\n", err)
+				failures = append(failures, fmt.Errorf("%s: %w", name, err))
+				continue
+			}
+
+			if err := printInspectReport(report, stdout); err != nil {
+				return err
+			}
 		}
+	}
 
-		if err := printInspectReport(report, stdout); err != nil {
-			return err
+	if *jsonOutput {
+		resp := youtube.BuildInspectResponse(results)
+		data, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal inspect JSON: %w", err)
+		}
+		data = append(data, '\n')
+		if _, err := stdout.Write(data); err != nil {
+			return fmt.Errorf("write inspect JSON: %w", err)
 		}
 	}
 

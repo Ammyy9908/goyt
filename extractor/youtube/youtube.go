@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -77,7 +78,9 @@ func (e *Extractor) Extract(
 type DiscoveredFormat struct {
 	ID                 int
 	MIMEType           string
+	Codecs             string
 	Quality            string
+	Width              int
 	Height             int
 	Bitrate            int64
 	HasDirectURL       bool
@@ -356,10 +359,19 @@ func buildReport(id string, player *playerResponse) *Report {
 			hasN = parsed.Query().Get("n") != ""
 		}
 
+		mediaType := f.MIMEType
+		codecs := ""
+		if mt, params, err := mime.ParseMediaType(f.MIMEType); err == nil {
+			mediaType = mt
+			codecs = params["codecs"]
+		}
+
 		report.Formats = append(report.Formats, DiscoveredFormat{
 			ID:                 f.Itag,
-			MIMEType:           f.MIMEType,
+			MIMEType:           mediaType,
+			Codecs:             codecs,
 			Quality:            f.QualityLabel,
+			Width:              f.Width,
 			Height:             f.Height,
 			Bitrate:            f.Bitrate,
 			HasDirectURL:       f.URL != "",
