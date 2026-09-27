@@ -11,8 +11,10 @@ import (
 )
 
 type executorProcessor struct {
-	merge func(context.Context, string, string, string) error
-	remux func(context.Context, string, string) error
+	merge        func(context.Context, string, string, string) error
+	remux        func(context.Context, string, string) error
+	convertAudio func(context.Context, string, string, AudioOutputSpec, bool) error
+	hasEncoder   func(context.Context, string) (bool, error)
 }
 
 func (p *executorProcessor) Merge(
@@ -30,6 +32,29 @@ func (p *executorProcessor) Remux(
 	output string,
 ) error {
 	return p.remux(ctx, input, output)
+}
+
+func (p *executorProcessor) ConvertAudio(
+	ctx context.Context,
+	input string,
+	output string,
+	spec AudioOutputSpec,
+	isHLS bool,
+) error {
+	if p.convertAudio != nil {
+		return p.convertAudio(ctx, input, output, spec, isHLS)
+	}
+	return nil
+}
+
+func (p *executorProcessor) HasEncoder(
+	ctx context.Context,
+	encoder string,
+) (bool, error) {
+	if p.hasEncoder != nil {
+		return p.hasEncoder(ctx, encoder)
+	}
+	return true, nil
 }
 
 func executorHTTPServer() *httptest.Server {

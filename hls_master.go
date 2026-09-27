@@ -393,6 +393,159 @@ func (m *HLSMaster) SelectWithAudioLanguage(
 	return best, nil
 }
 
+// HLSAudioSelection describes the selected audio rendition for an audio-only download.
+type HLSAudioSelection struct {
+	Audio           HLSAudioRendition
+	AudioIsOriginal bool
+	AudioWarning    string
+}
+
+// SelectAudioOnly chooses a supported external audio rendition for an audio-only download.
+func (m *HLSMaster) SelectAudioOnly(language string) (*HLSAudioSelection, error) {
+	if m == nil {
+		return nil, errors.New("goyt: HLS master is nil")
+	}
+
+	language = strings.ToLower(strings.TrimSpace(language))
+
+	// Find external audio renditions (those with a valid URI).
+	var externalAudio []HLSAudioRendition
+	for _, audio := range m.Audio {
+		if audio.URL != "" {
+			externalAudio = append(externalAudio, audio)
+		}
+	}
+
+	if len(externalAudio) == 0 {
+		return nil, errors.New("goyt: no supported separate audio rendition found; muxed audio/video is unsupported in audio-only mode")
+	}
+
+	// 1. If language is explicitly specified:
+	if language != "" {
+		var selected *HLSAudioRendition
+		bestLangRank := -1
+		bestPrefRank := -1
+		isOriginal := false
+
+		for _, audio := range externalAudio {
+			langRank := hlsLanguageRank(audio.Language, language)
+			if langRank < 0 {
+				continue
+			}
+
+			prefRank := 0
+			if isOriginalAudioName(audio.Name) {
+				prefRank += 10
+			}
+			if audio.Default {
+				prefRank += 4
+			}
+			if audio.AutoSelect {
+				prefRank += 2
+			}
+			if !isDubbedAudioName(audio.Name) {
+				prefRank += 1
+			}
+
+			if selected == nil ||
+				langRank > bestLangRank ||
+				(langRank == bestLangRank && prefRank > bestPrefRank) {
+				copy := audio
+				selected = &copy
+				bestLangRank = langRank
+				bestPrefRank = prefRank
+				isOriginal = isOriginalAudioName(audio.Name)
+			}
+		}
+
+		if selected == nil {
+			return nil, fmt.Errorf("goyt: no supported external audio rendition matching %q", language)
+		}
+
+		return &HLSAudioSelection{
+			Audio:           *selected,
+			AudioIsOriginal: isOriginal,
+		}, nil
+	}
+
+	// 2. Automatic selection: prefer original audio based on evidence.
+	var originalCandidates []HLSAudioRendition
+	for _, audio := range externalAudio {
+		if isOriginalAudioName(audio.Name) {
+			originalCandidates = append(originalCandidates, audio)
+		}
+	}
+
+	if len(originalCandidates) > 0 {
+		var selected *HLSAudioRendition
+		bestPref := -1
+		for _, audio := range originalCandidates {
+			pref := 0
+			if audio.Default {
+				pref += 4
+			}
+			if audio.AutoSelect {
+				pref += 2
+			}
+			if selected == nil || pref > bestPref {
+				copy := audio
+				selected = &copy
+				bestPref = pref
+			}
+		}
+		warning := ""
+		if len(originalCandidates) > 1 {
+			warning = fmt.Sprintf(
+				"goyt: multiple audio renditions are marked original in group %q; selected %q using default/autoselect preference and playlist order",
+				selected.GroupID,
+				selected.Name,
+			)
+		}
+		return &HLSAudioSelection{
+			Audio:           *selected,
+			AudioIsOriginal: true,
+			AudioWarning:    warning,
+		}, nil
+	}
+
+	// 3. No original audio evidence found. Fall back to playlist default.
+	var selected *HLSAudioRendition
+	bestPref := -1
+	for _, audio := range externalAudio {
+		pref := 0
+		if audio.Default {
+			pref += 8
+		}
+		if audio.AutoSelect {
+			pref += 4
+		}
+		if !isDubbedAudioName(audio.Name) {
+			pref += 2
+		}
+
+		if selected == nil || pref > bestPref {
+			copy := audio
+			selected = &copy
+			bestPref = pref
+		}
+	}
+
+	warning := ""
+	if selected != nil {
+		warning = fmt.Sprintf(
+			"goyt: original audio track could not be established from metadata; selecting fallback audio %q (%s)",
+			selected.Name,
+			selected.Language,
+		)
+	}
+
+	return &HLSAudioSelection{
+		Audio:           *selected,
+		AudioIsOriginal: false,
+		AudioWarning:    warning,
+	}, nil
+}
+
 // Keep this wrapper for existing internal callers and tests.
 func (m *HLSMaster) selectAudio(group string) *HLSAudioRendition {
 	audio, _, _ := m.selectAudioLanguage(group, "")

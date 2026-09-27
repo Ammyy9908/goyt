@@ -28,6 +28,15 @@ type HLSResult struct {
 	AudioWarning     string
 }
 
+type HLSAudioResult struct {
+	ExecutionResult
+	PlaylistDuration time.Duration
+	SelectedAudio    *HLSAudioRendition
+	AudioIsOriginal  bool
+	AudioWarning     string
+	OutputSpec       AudioOutputSpec
+}
+
 type HLSDownloader struct {
 	http      *Downloader
 	processor *FFmpeg
@@ -233,6 +242,213 @@ func (h *HLSDownloader) DownloadWithAudioLanguage(
 		SelectedAudio:    resolved.SelectedAudio,
 		AudioIsOriginal:  resolved.AudioIsOriginal,
 		AudioWarning:     resolved.AudioWarning,
+	}
+
+	if err := os.RemoveAll(workDir); err != nil {
+		result.WorkDir = workDir
+		result.CleanupError = err
+	}
+
+	return result, nil
+}
+
+// DownloadAudio downloads an audio-only HLS presentation and converts it according to spec.
+//
+// If resource is a master playlist, it selects a supported external audio rendition.
+// If resource is a media playlist, it is downloaded directly (confirmed to be audio-only).
+// Zero video playlists or video segments are requested.
+func (h *HLSDownloader) DownloadAudio(
+	ctx context.Context,
+	resource Resource,
+	destination string,
+	audioLanguage string,
+	spec AudioOutputSpec,
+	options DownloadOptions,
+	progress func(HLSProgress),
+) (*HLSAudioResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if h == nil || h.http == nil || h.processor == nil {
+		return nil, errors.New("goyt: create HLSDownloader with its constructor")
+	}
+
+	if destination == "" {
+		return nil, errors.New("goyt: destination is required")
+	}
+
+	var qualPtr *int
+	if spec.Quality >= 0 {
+		qual := spec.Quality
+		qualPtr = &qual
+	}
+
+	resolvedSpec, err := ResolveAudioOutputSpec(
+		spec.RequestedFormat,
+		"aac", // HLS audio tracks are AAC
+		qualPtr,
+		spec.Bitrate,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if !strings.EqualFold(filepath.Ext(destination), resolvedSpec.Extension) {
+		return nil, fmt.Errorf("goyt: destination extension must be %s", resolvedSpec.Extension)
+	}
+
+	if !resolvedSpec.Copy && resolvedSpec.Encoder != "" {
+		has, err := h.processor.HasEncoder(ctx, resolvedSpec.Encoder)
+		if err == nil && !has {
+			return nil, fmt.Errorf("goyt: required FFmpeg audio encoder %q is not available", resolvedSpec.Encoder)
+		}
+	}
+
+	if options.MaxRetries < 0 || options.RetryDelay < 0 {
+		return nil, errors.New("goyt: invalid retry options")
+	}
+
+	output, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	if info, err := os.Stat(output); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("goyt: destination must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	workDir, err := os.MkdirTemp(filepath.Dir(output), ".goyt-hls-*")
+	if err != nil {
+		return nil, err
+	}
+
+	fail := func(stage string, err error) (*HLSAudioResult, error) {
+		return nil, &ExecutionError{
+			Stage:   stage,
+			WorkDir: workDir,
+			Err:     err,
+		}
+	}
+
+	data, base, headers, err := h.fetchPlaylist(ctx, resource)
+	if err != nil {
+		return fail("fetch playlist", err)
+	}
+
+	var track *hlsTrack
+	var selectedAudio *HLSAudioRendition
+	var isOriginal bool
+	var warning string
+
+	if !isHLSMaster(data) {
+		if audioLanguage != "" {
+			return fail(
+				"resolve playlist",
+				errors.New(
+					"goyt: cannot select an audio language from a media playlist without master rendition metadata",
+				),
+			)
+		}
+
+		playlist, err := ParseHLS(data, base)
+		if err != nil {
+			return fail("parse media playlist", err)
+		}
+
+		track = &hlsTrack{
+			Playlist: playlist,
+			BaseURL:  base,
+			Headers:  headers,
+		}
+	} else {
+		master, err := ParseHLSMaster(data, base)
+		if err != nil {
+			return fail("parse master playlist", err)
+		}
+
+		audioSelection, err := master.SelectAudioOnly(audioLanguage)
+		if err != nil {
+			return fail("select audio rendition", err)
+		}
+
+		selectedAudio = &audioSelection.Audio
+		isOriginal = audioSelection.AudioIsOriginal
+		warning = audioSelection.AudioWarning
+
+		track, err = h.resolveMediaTrack(ctx, audioSelection.Audio.URL, base, headers)
+		if err != nil {
+			return fail("resolve audio track", err)
+		}
+	}
+
+	localPlaylist := filepath.Join(workDir, "audio.m3u8")
+	completed := 0
+	totalSegments := len(track.Playlist.Segments)
+
+	err = h.downloadTrack(
+		ctx,
+		track,
+		localPlaylist,
+		options,
+		func() {
+			completed++
+			if progress != nil {
+				progress(HLSProgress{
+					CompletedSegments: completed,
+					TotalSegments:     totalSegments,
+				})
+			}
+		},
+	)
+	if err != nil {
+		return fail("download audio segments", err)
+	}
+
+	staged := filepath.Join(workDir, "output"+resolvedSpec.Extension)
+
+	err = h.processor.ConvertAudio(
+		ctx,
+		localPlaylist,
+		staged,
+		resolvedSpec,
+		true,
+	)
+	if err != nil {
+		return fail("process HLS audio", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("commit HLS audio", err)
+	}
+
+	info, err := os.Stat(staged)
+	if err != nil {
+		return fail("inspect HLS audio output", err)
+	}
+
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fail("inspect HLS audio output", errors.New("empty or invalid output"))
+	}
+
+	if err := os.Rename(staged, output); err != nil {
+		return fail("commit HLS audio", err)
+	}
+
+	result := &HLSAudioResult{
+		ExecutionResult: ExecutionResult{
+			Path:      output,
+			SizeBytes: info.Size(),
+		},
+		PlaylistDuration: track.Playlist.Duration,
+		SelectedAudio:    selectedAudio,
+		AudioIsOriginal:  isOriginal,
+		AudioWarning:     warning,
+		OutputSpec:       resolvedSpec,
 	}
 
 	if err := os.RemoveAll(workDir); err != nil {

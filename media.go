@@ -30,17 +30,21 @@ const (
 //
 // Empty codec names mean unknown; "none" means absent.
 type Format struct {
-	ID         string
-	Protocol   Protocol
-	Container  string
-	VideoCodec string
-	AudioCodec string
-	Width      *int
-	Height     *int
-	Bitrate    *int64
-	SizeBytes  *int64
-	Language   string
-	Resource   Resource
+	ID              string
+	Protocol        Protocol
+	Container       string
+	VideoCodec      string
+	AudioCodec      string
+	Width           *int
+	Height          *int
+	Bitrate         *int64
+	SizeBytes       *int64
+	Language        string
+	AudioTrackID    string
+	AudioTrackName  string
+	AudioIsDefault  bool
+	AudioIsOriginal bool
+	Resource        Resource
 }
 
 // Resource describes a potentially temporary media URL.

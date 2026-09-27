@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,10 +60,24 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return err
 	}
 
+	targetPath, err := filepath.Abs(*output)
+	if err != nil {
+		return err
+	}
+
+	stagingFile, err := os.CreateTemp(filepath.Dir(targetPath), ".goyt-cli-staged-*.mp4")
+	if err != nil {
+		return err
+	}
+	stagedPath := stagingFile.Name()
+	_ = stagingFile.Close()
+	_ = os.Remove(stagedPath)
+	defer os.Remove(stagedPath)
+
 	result, err := downloader.Download(
 		ctx,
 		goyt.Resource{URL: *source},
-		*output,
+		stagedPath,
 		*maxHeight,
 		goyt.DownloadOptions{
 			Resume:     true,
@@ -99,6 +114,10 @@ func runHLS(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return fmt.Errorf("decode failed; output retained: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Saved and verified %s\n", result.Path)
+	if err := os.Rename(result.Path, targetPath); err != nil {
+		return fmt.Errorf("failed to commit destination file: %w", err)
+	}
+
+	fmt.Fprintf(stdout, "Saved and verified %s\n", targetPath)
 	return nil
 }

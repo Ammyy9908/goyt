@@ -246,3 +246,93 @@ video.m3u8
 		t.Fatal("multiple default renditions were accepted")
 	}
 }
+
+func TestSelectAudioOnly(t *testing.T) {
+	base, _ := url.Parse("https://media.test/master.m3u8")
+
+	t.Run("selects original audio over default", func(t *testing.T) {
+		master, err := ParseHLSMaster([]byte(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Español - dubbed",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,URI="es.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English - original",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=YES,URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",AUDIO="audio"
+video.m3u8
+`), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		selected, err := master.SelectAudioOnly("")
+		if err != nil {
+			t.Fatalf("SelectAudioOnly failed: %v", err)
+		}
+		if selected.Audio.URL != "https://media.test/en.m3u8" || !selected.AudioIsOriginal {
+			t.Fatalf("expected English original track, got %+v", selected)
+		}
+	})
+
+	t.Run("selects requested language", func(t *testing.T) {
+		master, err := ParseHLSMaster([]byte(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Spanish",LANGUAGE="es",DEFAULT=YES,AUTOSELECT=YES,URI="es.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="German",LANGUAGE="de",DEFAULT=NO,AUTOSELECT=YES,URI="de.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",AUDIO="audio"
+video.m3u8
+`), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		selected, err := master.SelectAudioOnly("de")
+		if err != nil {
+			t.Fatalf("SelectAudioOnly failed: %v", err)
+		}
+		if selected.Audio.Language != "de" || selected.Audio.URL != "https://media.test/de.m3u8" {
+			t.Fatalf("expected German audio track, got %+v", selected)
+		}
+
+		// Missing language error
+		if _, err := master.SelectAudioOnly("fr"); err == nil {
+			t.Fatal("expected error for missing French language, got nil")
+		}
+	})
+
+	t.Run("explicit language overrides original track preference", func(t *testing.T) {
+		master, err := ParseHLSMaster([]byte(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Español - original",LANGUAGE="es",DEFAULT=NO,AUTOSELECT=YES,URI="es.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Deutsch - dubbed-auto",LANGUAGE="de",DEFAULT=YES,AUTOSELECT=YES,URI="de.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2",AUDIO="audio"
+video.m3u8
+`), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		selected, err := master.SelectAudioOnly("de")
+		if err != nil {
+			t.Fatalf("SelectAudioOnly failed: %v", err)
+		}
+		if selected.Audio.Language != "de" || selected.Audio.URL != "https://media.test/de.m3u8" {
+			t.Fatalf("expected German audio track, got %+v", selected)
+		}
+		if selected.AudioIsOriginal {
+			t.Fatal("expected AudioIsOriginal to be false when explicit dubbed language is selected")
+		}
+	})
+
+	t.Run("rejects when no separate audio renditions available", func(t *testing.T) {
+		master, err := ParseHLSMaster([]byte(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"
+combined.m3u8
+`), base)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = master.SelectAudioOnly("")
+		if err == nil {
+			t.Fatal("expected error when no separate audio renditions exist, got nil")
+		}
+		if !strings.Contains(err.Error(), "no supported separate audio rendition found") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}

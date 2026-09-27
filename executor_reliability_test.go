@@ -236,3 +236,62 @@ func TestExecutorSecondDownloadFailurePreservesFirstInput(t *testing.T) {
 		"video",
 	)
 }
+
+func TestExecutorAudioFailurePreservesDestination(t *testing.T) {
+	server := executorHTTPServer()
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "output.mp3")
+	if err := os.WriteFile(output, []byte("pre-existing-mp3-content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	processor := &executorProcessor{
+		convertAudio: func(
+			ctx context.Context,
+			input string,
+			dest string,
+			spec AudioOutputSpec,
+			isHLS bool,
+		) error {
+			return errors.New("simulated audio conversion failure")
+		},
+	}
+
+	executor, err := NewExecutor(
+		NewDownloader(server.Client()),
+		processor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := executor.ExecuteAudio(
+		context.Background(),
+		&AudioPlan{
+			Stream: executorFormat(server.URL, "/audio", "none", "aac"),
+			OutputSpec: AudioOutputSpec{
+				RequestedFormat: AudioFormatMP3,
+				ResolvedCodec:   "mp3",
+				Container:       "mp3",
+				Extension:       ".mp3",
+				Encoder:         "libmp3lame",
+			},
+		},
+		output,
+		ExecuteOptions{},
+	)
+
+	if err == nil || result != nil {
+		t.Fatal("expected audio execution failure")
+	}
+
+	var executionErr *ExecutionError
+	if !errors.As(err, &executionErr) ||
+		executionErr.Stage != "processing audio" ||
+		executionErr.WorkDir == "" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	executorAssertFile(t, output, "pre-existing-mp3-content")
+}

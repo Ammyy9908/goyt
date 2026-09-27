@@ -54,18 +54,36 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: gh release view "$RELEASE_TAG"
 
-      - name: Install FFmpeg for local integration tests
+      - name: Install FFmpeg and verify required audio encoders
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+          encoder_list="$(ffmpeg -hide_banner -encoders 2>&1)"
+
+          for enc in aac alac flac libmp3lame libopus libvorbis pcm_s16le; do
+            if ! awk -v wanted="$enc" '
+              $2 == wanted { found = 1 }
+              END { exit !found }
+            ' <<< "$encoder_list"; then
+              echo "Missing required encoder: $enc"
+              exit 1
+            fi
+            echo "Found required encoder: $enc"
+          done
 
       - name: Validate tagged source
+        env:
+          GOYT_REQUIRE_ALL_ENCODERS: "true"
         run: |
           go vet ./...
           go test -race -count=1 -timeout=5m ./...
           go test -race -tags=integration \
-            -run '^(TestFFmpegIntegration|TestExecutorIntegration)$' \
-            -count=1 -timeout=5m ./...
+            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestDecodeFailurePreservesExistingDestination)$' \
+            -count=1 -timeout=5m -v ./...
 
       - name: Verify embedded version
         shell: bash

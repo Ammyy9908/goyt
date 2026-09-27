@@ -271,4 +271,123 @@ func TestLegacyShorthandRouting(t *testing.T) {
 			t.Fatalf("expected transport error, got: %v", err)
 		}
 	})
+
+	t.Run("legacy shorthand with audio-only", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{"-url", "https://example.com/video", "-audio-only"}, &stdout, &stderr)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		// Should reach extractor validation for download command
+		if !strings.Contains(err.Error(), "unsupported YouTube URL") {
+			t.Fatalf("expected unsupported YouTube URL error, got: %v", err)
+		}
+	})
+}
+
+func TestAudioOnlyCLIFlagValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "audio-format without audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-format", "mp3"},
+			wantErr: "-audio-format, -audio-quality, and -audio-bitrate require -audio-only",
+		},
+		{
+			name:    "audio-quality without audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-quality", "2"},
+			wantErr: "-audio-format, -audio-quality, and -audio-bitrate require -audio-only",
+		},
+		{
+			name:    "audio-bitrate without audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-bitrate", "128k"},
+			wantErr: "-audio-format, -audio-quality, and -audio-bitrate require -audio-only",
+		},
+		{
+			name:    "quality and bitrate mutually exclusive",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-quality", "2", "-audio-bitrate", "128k"},
+			wantErr: "explicit -audio-quality and -audio-bitrate are mutually exclusive",
+		},
+		{
+			name:    "explicit height with audio-only",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-height", "720"},
+			wantErr: "-height is not supported in -audio-only mode",
+		},
+		{
+			name:    "unsupported audio format",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "wma"},
+			wantErr: "unsupported audio format",
+		},
+		{
+			name:    "audio quality for non-mp3 format",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "aac", "-audio-quality", "2"},
+			wantErr: "-audio-quality is only supported for mp3 format",
+		},
+		{
+			name:    "audio bitrate for flac format",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "flac", "-audio-bitrate", "128k"},
+			wantErr: "-audio-bitrate is not supported for flac format",
+		},
+		{
+			name:    "audio bitrate for wav format",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "wav", "-audio-bitrate", "128k"},
+			wantErr: "-audio-bitrate is not supported for wav format",
+		},
+		{
+			name:    "audio bitrate for alac format",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "alac", "-audio-bitrate", "128k"},
+			wantErr: "-audio-bitrate is not supported for alac format",
+		},
+		{
+			name:    "negative audio quality",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "mp3", "-audio-quality", "-1"},
+			wantErr: "audio quality must be between 0 and 9",
+		},
+		{
+			name:    "too high audio quality",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "mp3", "-audio-quality", "10"},
+			wantErr: "audio quality must be between 0 and 9",
+		},
+		{
+			name:    "invalid audio bitrate",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "mp3", "-audio-bitrate", "invalid"},
+			wantErr: "invalid audio bitrate",
+		},
+		{
+			name:    "non-flac output for flac mode",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "flac", "-out", "song.mp3"},
+			wantErr: "audio-only flac mode requires a .flac output",
+		},
+		{
+			name:    "non-m4a output for alac mode",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "alac", "-out", "song.alac"},
+			wantErr: "audio-only alac mode requires a .m4a output",
+		},
+		{
+			name:    "non-ogg output for vorbis mode",
+			args:    []string{"download", "-url", "https://youtube.com/watch?v=123", "-audio-only", "-audio-format", "vorbis", "-out", "song.mp3"},
+			wantErr: "audio-only vorbis mode requires a .ogg output",
+		},
+		{
+			name:    "default height with audio-only is accepted up to URL validation",
+			args:    []string{"download", "-url", "https://example.com/video", "-audio-only"},
+			wantErr: "unsupported YouTube URL",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), tc.args, &stdout, &stderr)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
 }

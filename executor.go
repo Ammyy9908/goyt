@@ -296,6 +296,151 @@ func (e *Executor) Execute(
 	return result, nil
 }
 
+// ExecuteAudio downloads an audio plan and converts it according to its OutputSpec.
+//
+// The output extension must match the plan's OutputSpec.Extension.
+// An existing destination is replaced only after its replacement is ready.
+// Failure or cancellation preserves any existing destination and retains intermediate files.
+func (e *Executor) ExecuteAudio(
+	ctx context.Context,
+	plan *AudioPlan,
+	destination string,
+	options ExecuteOptions,
+) (*ExecutionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if e == nil || e.downloader == nil {
+		return nil, errors.New("goyt: create Executor with NewExecutor first")
+	}
+
+	if err := validateAudioExecutionPlan(plan, destination); err != nil {
+		return nil, err
+	}
+
+	if options.Download.MaxRetries < 0 || options.Download.RetryDelay < 0 {
+		return nil, errors.New("goyt: invalid retry options")
+	}
+
+	output, err := filepath.Abs(destination)
+	if err != nil {
+		return nil, err
+	}
+
+	if info, err := os.Stat(output); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("goyt: destination must be a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	audioConverter, ok := e.processor.(interface {
+		ConvertAudio(context.Context, string, string, AudioOutputSpec, bool) error
+	})
+	if !ok || e.processor == nil {
+		return nil, errors.New("goyt: this plan requires an audio processor with audio conversion support")
+	}
+
+	if !plan.OutputSpec.Copy && plan.OutputSpec.Encoder != "" {
+		if encoderChecker, ok := e.processor.(interface {
+			HasEncoder(context.Context, string) (bool, error)
+		}); ok {
+			has, err := encoderChecker.HasEncoder(ctx, plan.OutputSpec.Encoder)
+			if err == nil && !has {
+				return nil, fmt.Errorf("goyt: required FFmpeg audio encoder %q is not available", plan.OutputSpec.Encoder)
+			}
+		}
+	}
+
+	workDir, err := os.MkdirTemp(filepath.Dir(output), ".goyt-work-*")
+	if err != nil {
+		return nil, err
+	}
+
+	fail := func(stage string, err error) (*ExecutionResult, error) {
+		return nil, &ExecutionError{
+			Stage:   stage,
+			WorkDir: workDir,
+			Err:     err,
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("download", err)
+	}
+
+	streamInput := filepath.Join(workDir, "stream-0.media")
+
+	downloadOptions := options.Download
+	origProgress := downloadOptions.OnProgress
+	downloadOptions.OnProgress = func(progress Progress) {
+		if origProgress != nil {
+			origProgress(progress)
+		}
+		if options.OnProgress != nil {
+			options.OnProgress(ExecutionProgress{
+				StreamIndex: 0,
+				StreamCount: 1,
+				FormatID:    plan.Stream.ID,
+				Download:    progress,
+			})
+		}
+	}
+
+	_, err = e.downloader.Download(ctx, plan.Stream.Resource, streamInput, downloadOptions)
+	if err != nil {
+		return fail("download audio stream", err)
+	}
+
+	info, err := os.Stat(streamInput)
+	if err != nil {
+		return fail("inspect downloaded stream", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fail("inspect downloaded stream", errors.New("downloaded stream is not a regular file"))
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("processing", err)
+	}
+
+	stagedOutput := filepath.Join(workDir, "output"+plan.OutputSpec.Extension)
+
+	if err := audioConverter.ConvertAudio(ctx, streamInput, stagedOutput, plan.OutputSpec, false); err != nil {
+		return fail("processing audio", err)
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail("processing", err)
+	}
+
+	stagedInfo, err := os.Stat(stagedOutput)
+	if err != nil {
+		return fail("inspect processed output", err)
+	}
+	if !stagedInfo.Mode().IsRegular() || stagedInfo.Size() == 0 {
+		return fail("inspect processed output", errors.New("processor produced no usable output"))
+	}
+
+	if err := os.Rename(stagedOutput, output); err != nil {
+		return fail("commit output", err)
+	}
+
+	result := &ExecutionResult{
+		Path:      output,
+		SizeBytes: stagedInfo.Size(),
+	}
+
+	if err := os.RemoveAll(workDir); err != nil {
+		result.WorkDir = workDir
+		result.CleanupError = err
+	}
+
+	return result, nil
+}
+
 func executionDownloadOptions(
 	options ExecuteOptions,
 	plan *DownloadPlan,
@@ -399,6 +544,45 @@ func validateExecutionPlan(
 		if !usableResource(stream) {
 			return errors.New("goyt: invalid stream resource")
 		}
+	}
+
+	return nil
+}
+
+func validateAudioExecutionPlan(plan *AudioPlan, destination string) error {
+	if plan == nil {
+		return errors.New("goyt: audio plan is nil")
+	}
+
+	if destination == "" {
+		return errors.New("goyt: destination is empty")
+	}
+
+	if plan.OutputSpec.Extension == "" {
+		return errors.New("goyt: audio output specification missing extension")
+	}
+
+	if !strings.EqualFold(filepath.Ext(destination), plan.OutputSpec.Extension) {
+		return fmt.Errorf("goyt: destination extension must be %s", plan.OutputSpec.Extension)
+	}
+
+	if plan.Stream.Protocol != ProtocolHTTP {
+		return fmt.Errorf(
+			"goyt: executor does not support protocol %q yet",
+			plan.Stream.Protocol,
+		)
+	}
+
+	if !usableResource(plan.Stream) {
+		return errors.New("goyt: invalid stream resource")
+	}
+
+	if normalizeCodec(plan.Stream.VideoCodec) != "none" {
+		return errors.New("goyt: audio plan must not contain a video stream")
+	}
+
+	if !knownAudio(plan.Stream.AudioCodec) {
+		return errors.New("goyt: unsupported audio codec in plan")
 	}
 
 	return nil

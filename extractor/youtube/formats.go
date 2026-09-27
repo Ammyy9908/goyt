@@ -176,6 +176,16 @@ func convertDirectFormat(
 		},
 	}
 
+	if raw.AudioTrack != nil {
+		format.AudioTrackID = raw.AudioTrack.ID
+		format.AudioTrackName = raw.AudioTrack.DisplayName
+		format.AudioIsDefault = raw.AudioTrack.AudioIsDefault
+		format.AudioIsOriginal = isOriginalAudioName(raw.AudioTrack.DisplayName) ||
+			strings.Contains(strings.ToLower(raw.AudioTrack.ID), "original")
+		tag, _, _ := strings.Cut(raw.AudioTrack.ID, ".")
+		format.Language = strings.ToLower(strings.TrimSpace(tag))
+	}
+
 	if raw.Width > 0 {
 		width := raw.Width
 		format.Width = &width

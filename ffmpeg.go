@@ -81,6 +81,7 @@ func runFFmpeg(
 	// Arguments are passed directly. No shell is involved.
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stderr = stderr
+	cmd.Stdout = stderr
 
 	// Bound waiting for process I/O after cancellation or process exit.
 	cmd.WaitDelay = 2 * time.Second
@@ -127,6 +128,244 @@ func (f *FFmpeg) Remux(
 		[]string{"-map", "0:v:0", "-map", "0:a:0"},
 		destination,
 	)
+}
+
+// HasEncoder checks if the specified audio encoder is available in FFmpeg.
+func (f *FFmpeg) HasEncoder(ctx context.Context, encoder string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	if f == nil || f.path == "" || f.run == nil {
+		return false, errors.New("goyt: create FFmpeg with NewFFmpeg first")
+	}
+
+	encoder = strings.ToLower(strings.TrimSpace(encoder))
+	if encoder == "" {
+		return false, errors.New("goyt: encoder name is empty")
+	}
+
+	diagnostics := &diagnosticTail{limit: 65536}
+
+	err := f.run(ctx, f.path, []string{"-hide_banner", "-encoders"}, diagnostics)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		return false, fmt.Errorf("goyt: probe ffmpeg encoders failed: %w", err)
+	}
+
+	lines := strings.Split(string(diagnostics.data), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) < 8 {
+			continue
+		}
+		// Audio encoders start with A in flag position (index 1 in " A....D")
+		// e.g. "A....D aac" or " A....D libmp3lame"
+		fields := strings.Fields(trimmed)
+		if len(fields) >= 2 {
+			flags := fields[0]
+			if strings.HasPrefix(flags, "A") || (len(flags) >= 2 && flags[0] == 'A') {
+				encName := strings.ToLower(fields[1])
+				if encName == encoder {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// ConvertAudio converts an input audio media file or local HLS playlist
+// to the output format and container specified by AudioOutputSpec.
+func (f *FFmpeg) ConvertAudio(
+	ctx context.Context,
+	inputPath string,
+	destination string,
+	spec AudioOutputSpec,
+	isHLS bool,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if f == nil || f.path == "" || f.run == nil {
+		return errors.New("goyt: create FFmpeg with NewFFmpeg first")
+	}
+
+	if destination == "" {
+		return errors.New("goyt: destination is empty")
+	}
+
+	if spec.Extension == "" || spec.Container == "" {
+		return errors.New("goyt: invalid audio output specification")
+	}
+
+	if !strings.EqualFold(filepath.Ext(destination), spec.Extension) {
+		return fmt.Errorf("goyt: destination extension must be %s", spec.Extension)
+	}
+
+	output, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+
+	outputInfo, err := os.Stat(output)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if outputInfo != nil && !outputInfo.Mode().IsRegular() {
+		return errors.New("goyt: destination must be a regular file")
+	}
+
+	if inputPath == "" {
+		return errors.New("goyt: input path is empty")
+	}
+
+	absoluteInput, err := filepath.Abs(inputPath)
+	if err != nil {
+		return err
+	}
+
+	inputInfo, err := os.Stat(absoluteInput)
+	if err != nil {
+		return fmt.Errorf("goyt: inspect input: %w", err)
+	}
+
+	if !inputInfo.Mode().IsRegular() {
+		return errors.New("goyt: inputs must be regular local files")
+	}
+
+	if absoluteInput == output || (outputInfo != nil && os.SameFile(inputInfo, outputInfo)) {
+		return errors.New("goyt: output must differ from input files")
+	}
+
+	temp, err := os.CreateTemp(
+		filepath.Dir(output),
+		".goyt-ffmpeg-*"+spec.Extension,
+	)
+	if err != nil {
+		return err
+	}
+
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+
+	if err := temp.Close(); err != nil {
+		return err
+	}
+
+	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
+		"-nostdin",
+		"-y",
+	}
+
+	if isHLS {
+		// Supported HLS presentations are unencrypted, fully downloaded to disk, and
+		// reference only local media files. Restrict FFmpeg to local file access only.
+		// Note that while protocol whitelisting restricts external protocol/network schemes,
+		// it is not a full filesystem sandbox.
+		args = append(args,
+			"-copyts", "-start_at_zero",
+			"-protocol_whitelist", "file",
+			"-allowed_extensions", "m3u8,ts,aac",
+			"-f", "hls",
+		)
+	}
+
+	args = append(args, "-i", absoluteInput)
+	args = append(args,
+		"-vn",
+		"-map", "0:a:0",
+	)
+
+	if spec.Copy {
+		args = append(args, "-c:a", "copy")
+	} else {
+		if spec.Encoder == "" {
+			return errors.New("goyt: audio encoder is required when not copying")
+		}
+		args = append(args, "-c:a", spec.Encoder)
+		if (spec.Encoder == "libmp3lame" || spec.ResolvedCodec == "mp3") && spec.Quality >= 0 {
+			args = append(args, "-q:a", fmt.Sprintf("%d", spec.Quality))
+		}
+		if spec.Bitrate != "" {
+			args = append(args, "-b:a", spec.Bitrate)
+		}
+	}
+
+	args = append(args,
+		"-f", spec.Container,
+		tempPath,
+	)
+
+	diagnostics := &diagnosticTail{limit: 8192}
+
+	if err := f.run(ctx, f.path, args, diagnostics); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		return &FFmpegError{
+			Operation: "audio conversion",
+			Details:   strings.TrimSpace(string(diagnostics.data)),
+			Err:       err,
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		return err
+	}
+
+	if info.Size() == 0 {
+		return errors.New("goyt: ffmpeg produced an empty output")
+	}
+
+	if err := os.Rename(tempPath, output); err != nil {
+		return fmt.Errorf("goyt: commit ffmpeg output: %w", err)
+	}
+
+	return nil
+}
+
+// ConvertToMP3 converts an input audio media file or local HLS playlist
+// to an MP3 file using libmp3lame with the specified VBR quality (0–9).
+//
+// Lower quality values request higher VBR quality (e.g. 0 is highest quality,
+// 2 is high quality default, 9 is lowest quality).
+// Video streams are explicitly excluded.
+func (f *FFmpeg) ConvertToMP3(
+	ctx context.Context,
+	inputPath string,
+	destination string,
+	quality int,
+	isHLS bool,
+) error {
+	if quality < 0 || quality > 9 {
+		return errors.New("goyt: audio quality must be between 0 and 9 (inclusive)")
+	}
+
+	spec := AudioOutputSpec{
+		RequestedFormat: AudioFormatMP3,
+		ResolvedCodec:   "mp3",
+		Container:       "mp3",
+		Extension:       ".mp3",
+		Copy:            false,
+		Encoder:         "libmp3lame",
+		Quality:         quality,
+	}
+
+	return f.ConvertAudio(ctx, inputPath, destination, spec, isHLS)
 }
 
 func (f *FFmpeg) process(

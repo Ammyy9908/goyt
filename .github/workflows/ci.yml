@@ -31,12 +31,26 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg and verify required audio encoders
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           ffmpeg -version
           ffprobe -version
+
+          encoder_list="$(ffmpeg -hide_banner -encoders 2>&1)"
+
+          for enc in aac alac flac libmp3lame libopus libvorbis pcm_s16le; do
+            if ! awk -v wanted="$enc" '
+              $2 == wanted { found = 1 }
+              END { exit !found }
+            ' <<< "$encoder_list"; then
+              echo "Missing required encoder: $enc"
+              exit 1
+            fi
+            echo "Found required encoder: $enc"
+          done
 
       - name: Check formatting
         shell: bash
@@ -56,9 +70,11 @@ jobs:
         run: go test -race -count=1 -timeout=5m ./...
 
       - name: Local integration tests
+        env:
+          GOYT_REQUIRE_ALL_ENCODERS: "true"
         run: |
           go test -race -tags=integration \
-            -run '^(TestFFmpegIntegration|TestExecutorIntegration)$' \
+            -run '^(TestFFmpegIntegration|TestExecutorIntegration|TestAudioExecutorIntegration|TestHLSAudioIntegration|TestDecodeFailurePreservesExistingDestination)$' \
             -count=1 -timeout=5m -v ./...
 
       - name: Build commands
