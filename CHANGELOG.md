@@ -17,6 +17,7 @@
 
 ### Changed
 
+- Hardened `Verifier` (`VerifyVideo` and `VerifyAudio`) to stream and capture probe JSON directly from process stdout, eliminating dependency on the `-o` output option introduced in FFmpeg 5.0+ and ensuring full backward compatibility with `ffprobe` 4.4.x (specifically validated against Ubuntu 22.04 LTS `ffprobe 4.4.2-0ubuntu0.22.04.1` on Linux ARM64).
 - Updated inspection limitations in text reports and Schema 1 JSON outputs, accurately reporting that inspection reports detected challenges without solving, downloads can optionally solve supported challenges using `-js-runtime`, and a PO-token provider interface is available (player, gvs contexts) without built-in generation.
 - Pinned Docker container guidance in documentation to immutable multi-arch image digest `brainicism/bgutil-ytdlp-pot-provider@sha256:ed86b6fdd5e430ddd7c8ce1adb55e1ab54db7c7dbc1bcbf3a82454a85b971164` (tag `2.0.0`) with Linux ARM64 support for Oracle Cloud ARM instances.
 

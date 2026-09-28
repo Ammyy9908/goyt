@@ -1,10 +1,12 @@
 package goyt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -39,10 +41,32 @@ type AudioVerification struct {
 	AudioCodec string
 }
 
+type ffprobeRunner func(
+	ctx context.Context,
+	path string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) error
+
+func runFFprobe(
+	ctx context.Context,
+	path string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) error {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.WaitDelay = 2 * time.Second
+	return cmd.Run()
+}
+
 // Verifier inspects completed files using ffprobe.
 type Verifier struct {
 	path string
-	run  ffmpegRunner
+	run  ffprobeRunner
 }
 
 func NewVerifier(path string) (*Verifier, error) {
@@ -57,7 +81,7 @@ func NewVerifier(path string) (*Verifier, error) {
 
 	return &Verifier{
 		path: resolved,
-		run:  runFFmpeg,
+		run:  runFFprobe,
 	}, nil
 }
 
@@ -98,31 +122,18 @@ func (v *Verifier) VerifyVideo(
 		return nil, errors.New("goyt: output is not a non-empty regular file")
 	}
 
-	// Ask ffprobe to write its JSON to a temporary file.
-	// The runner's writer remains reserved for stderr diagnostics.
-	file, err := os.CreateTemp("", "goyt-probe-*.json")
-	if err != nil {
-		return nil, err
-	}
-	probePath := file.Name()
-	defer os.Remove(probePath)
-
-	if err := file.Close(); err != nil {
-		return nil, err
-	}
-
 	diagnostics := &diagnosticTail{limit: 8192}
+	var stdout bytes.Buffer
 
 	args := []string{
 		"-v", "error",
 		"-show_entries",
 		"format=duration,format_name:stream=codec_type,codec_name,duration,width,height",
 		"-of", "json",
-		"-o", probePath,
 		absolute,
 	}
 
-	if err := v.run(ctx, v.path, args, diagnostics); err != nil {
+	if err := v.run(ctx, v.path, args, &stdout, diagnostics); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -134,16 +145,11 @@ func (v *Verifier) VerifyVideo(
 		)
 	}
 
-	data, err := os.ReadFile(probePath)
-	if err != nil {
-		return nil, err
-	}
-
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return inspectProbeJSONVideoSpec(data, spec, expected)
+	return inspectProbeJSONVideoSpec(stdout.Bytes(), spec, expected)
 }
 
 // VerifyMP4 checks the output expected by backward-compatible callers:
@@ -382,29 +388,18 @@ func (v *Verifier) VerifyAudio(
 		return nil, errors.New("goyt: output is not a non-empty regular file")
 	}
 
-	file, err := os.CreateTemp("", "goyt-probe-*.json")
-	if err != nil {
-		return nil, err
-	}
-	probePath := file.Name()
-	defer os.Remove(probePath)
-
-	if err := file.Close(); err != nil {
-		return nil, err
-	}
-
 	diagnostics := &diagnosticTail{limit: 8192}
+	var stdout bytes.Buffer
 
 	args := []string{
 		"-v", "error",
 		"-show_entries",
 		"format=duration,format_name:stream=codec_type,codec_name,duration",
 		"-of", "json",
-		"-o", probePath,
 		absolute,
 	}
 
-	if err := v.run(ctx, v.path, args, diagnostics); err != nil {
+	if err := v.run(ctx, v.path, args, &stdout, diagnostics); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -416,16 +411,11 @@ func (v *Verifier) VerifyAudio(
 		)
 	}
 
-	data, err := os.ReadFile(probePath)
-	if err != nil {
-		return nil, err
-	}
-
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return inspectProbeJSONAudioSpec(data, spec, expected)
+	return inspectProbeJSONAudioSpec(stdout.Bytes(), spec, expected)
 }
 
 // VerifyMP3 checks the output expected in audio-only MP3 mode:
