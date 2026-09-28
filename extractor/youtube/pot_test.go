@@ -122,6 +122,27 @@ func TestPOToken_ValidationAndScope(t *testing.T) {
 		t.Fatalf("expected valid request, got: %v", err)
 	}
 
+	// Request validation: missing video ID on GVS context is rejected
+	missingVideoGVS := POTokenRequest{
+		Client:      ClientWeb,
+		Context:     POTokenContextGVS,
+		VideoID:     "",
+		VisitorData: "visitor-123",
+	}
+	if err := missingVideoGVS.Validate(); err == nil {
+		t.Fatal("expected error for GVS request with missing VideoID, got nil")
+	}
+
+	// Request validation: whitespace video ID on GVS context is rejected
+	whitespaceVideoGVS := POTokenRequest{
+		Client:  ClientWeb,
+		Context: POTokenContextGVS,
+		VideoID: "   ",
+	}
+	if err := whitespaceVideoGVS.Validate(); err == nil {
+		t.Fatal("expected error for GVS request with whitespace VideoID, got nil")
+	}
+
 	// 1. Valid result
 	now := time.Now()
 	exp := now.Add(1 * time.Hour)

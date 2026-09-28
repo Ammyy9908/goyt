@@ -14,6 +14,7 @@ import (
 
 	"github.com/ammyy9908/goyt"
 	"github.com/ammyy9908/goyt/extractor/youtube"
+	"github.com/ammyy9908/goyt/extractor/youtube/potprovider"
 )
 
 func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -42,6 +43,16 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		"none",
 		"JavaScript runtime for solving player cipher/n challenges: none, node, deno, bun, qjs, auto, or /path/to/binary",
 	)
+	poTokenProviderFlag := flags.String(
+		"po-token-provider",
+		"none",
+		"Proof-of-Origin token provider type: none, http, or bgutil-http",
+	)
+	poTokenEndpointFlag := flags.String(
+		"po-token-endpoint",
+		"",
+		"Proof-of-Origin token provider HTTP endpoint URL, e.g. http://127.0.0.1:4416",
+	)
 	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
 	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 	urlRefreshes := flags.Int("url-refreshes", 1, "maximum URL re-extractions on expired or forbidden media (0 disables)")
@@ -51,9 +62,9 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
-  goyt download -url URL -audio-only [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
-  goyt download -resume-job DIR [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
+  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
+  goyt download -url URL -audio-only [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
+  goyt download -resume-job DIR [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
 		flags.PrintDefaults()
 	}
@@ -206,9 +217,16 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if err != nil {
 			return err
 		}
+		poProvider, err := createPOTokenProvider(*poTokenProviderFlag, *poTokenEndpointFlag)
+		if err != nil {
+			return err
+		}
 		var extractorOpts []youtube.Option
 		if solver != nil {
 			extractorOpts = append(extractorOpts, youtube.WithChallengeSolver(solver))
+		}
+		if poProvider != nil {
+			extractorOpts = append(extractorOpts, youtube.WithPOTokenProvider(poProvider))
 		}
 		extractor := youtube.New(nil, extractorOpts...)
 
@@ -399,9 +417,16 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
+	poProvider, err := createPOTokenProvider(*poTokenProviderFlag, *poTokenEndpointFlag)
+	if err != nil {
+		return err
+	}
 	var extractorOpts []youtube.Option
 	if solver != nil {
 		extractorOpts = append(extractorOpts, youtube.WithChallengeSolver(solver))
+	}
+	if poProvider != nil {
+		extractorOpts = append(extractorOpts, youtube.WithPOTokenProvider(poProvider))
 	}
 
 	extractor := youtube.New(nil, extractorOpts...)
@@ -1604,5 +1629,31 @@ func printSelectedFormatDiagnostics(stderr io.Writer, extractor *youtube.Extract
 		} else {
 			fmt.Fprintln(stderr, diag.String())
 		}
+	}
+}
+
+func createPOTokenProvider(providerType, endpoint string) (youtube.POTokenProvider, error) {
+	normType := strings.ToLower(strings.TrimSpace(providerType))
+	trimmedEndpoint := strings.TrimSpace(endpoint)
+
+	if normType == "" || normType == "none" {
+		if trimmedEndpoint != "" {
+			return nil, errors.New("flag -po-token-endpoint requires -po-token-provider to be configured (e.g. -po-token-provider http)")
+		}
+		return nil, nil
+	}
+
+	switch normType {
+	case "http", "bgutil-http":
+		if trimmedEndpoint == "" {
+			return nil, errors.New("flag -po-token-endpoint is required when -po-token-provider is enabled")
+		}
+		p, err := potprovider.NewHTTPProvider(trimmedEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		return p, nil
+	default:
+		return nil, fmt.Errorf("unknown -po-token-provider %q: supported types are none, http, bgutil-http", providerType)
 	}
 }

@@ -51,6 +51,9 @@ func (r POTokenRequest) Validate() error {
 	default:
 		return fmt.Errorf("youtube: unsupported PO-token context %q", r.Context)
 	}
+	if r.Context == POTokenContextGVS && strings.TrimSpace(r.VideoID) == "" {
+		return errors.New("youtube: video ID is required for GVS PO-token request")
+	}
 	if r.VideoID != "" && !videoIDPattern.MatchString(r.VideoID) {
 		return errors.New("youtube: invalid video ID in PO-token request")
 	}

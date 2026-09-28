@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ammyy9908/goyt"
 	"github.com/ammyy9908/goyt/extractor/youtube"
@@ -2522,4 +2523,458 @@ func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestPOTokenCLI_FlagsValidation(t *testing.T) {
+	tempOut := filepath.Join(t.TempDir(), "test.mp4")
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name: "Endpoint provided without provider type",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-endpoint", "http://127.0.0.1:4416",
+			},
+			wantErr: "flag -po-token-endpoint requires -po-token-provider to be configured",
+		},
+		{
+			name: "Endpoint provided with provider none",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-provider", "none",
+				"-po-token-endpoint", "http://127.0.0.1:4416",
+			},
+			wantErr: "flag -po-token-endpoint requires -po-token-provider to be configured",
+		},
+		{
+			name: "Provider http without endpoint",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-provider", "http",
+			},
+			wantErr: "flag -po-token-endpoint is required when -po-token-provider is enabled",
+		},
+		{
+			name: "Unknown provider type",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-provider", "unsupported-type",
+				"-po-token-endpoint", "http://127.0.0.1:4416",
+			},
+			wantErr: "unknown -po-token-provider",
+		},
+		{
+			name: "Unencrypted remote HTTP endpoint rejected",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-provider", "http",
+				"-po-token-endpoint", "http://remote-server.example.com:4416",
+			},
+			wantErr: "must be localhost/loopback",
+		},
+		{
+			name: "Endpoint with credentials rejected",
+			args: []string{
+				"download",
+				"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+				"-out", tempOut,
+				"-po-token-provider", "http",
+				"-po-token-endpoint", "http://user:pass@127.0.0.1:4416",
+			},
+			wantErr: "credentials is not permitted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), tc.args, &stdout, &stderr)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestPOTokenCLI_StandardDownloadWiresProvider(t *testing.T) {
+	mockMediaData := createTestMP4Bytes(t)
+	sentinelToken := "cli-verified-pot-token-5566"
+	videoID := "abcdefghijk"
+	var providerCalls int64
+	var mediaRequests int64
+
+	// Mock YouTube server & PO-token handler in transport
+	mockHTML := makeMockWatchPageWithDurationHTML(videoID, "https://rr1---sn-ab5sznzs.googlevideo.com/videoplayback?itag=18", "1")
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.Path == "/get_pot" {
+			atomic.AddInt64(&providerCalls, 1)
+			var reqBody map[string]any
+			_ = json.NewDecoder(req.Body).Decode(&reqBody)
+			resp := map[string]any{
+				"poToken":        sentinelToken,
+				"contentBinding": reqBody["content_binding"],
+				"expiresAt":      time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339),
+			}
+			bodyBytes, _ := json.Marshal(resp)
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				ContentLength: int64(len(bodyBytes)),
+				Body:          io.NopCloser(bytes.NewReader(bodyBytes)),
+				Request:       req,
+			}, nil
+		}
+
+		if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Host, ".googlevideo.com") {
+			atomic.AddInt64(&mediaRequests, 1)
+			potParam := req.URL.Query().Get("pot")
+			if potParam != sentinelToken {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader("403 missing or bad pot")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+				ContentLength: int64(len(mockMediaData)),
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		outPath := filepath.Join(t.TempDir(), "output.mp4")
+
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-po-token-provider", "http",
+			"-po-token-endpoint", "http://127.0.0.1:4416",
+			"-out", outPath,
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("download with PO-token provider failed: %v\nStderr was:\n%s", err, stderr.String())
+		}
+
+		if calls := atomic.LoadInt64(&providerCalls); calls != 1 {
+			t.Fatalf("expected 1 provider call, got %d", calls)
+		}
+		if reqs := atomic.LoadInt64(&mediaRequests); reqs < 1 {
+			t.Fatalf("expected media requests, got %d", reqs)
+		}
+
+		info, err := os.Stat(outPath)
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("expected non-empty output file, got stat: %v", err)
+		}
+	})
+}
+
+func TestPOTokenCLI_ResumeJobWiresProviderWithoutManifestSecrets(t *testing.T) {
+	mockMediaData := createTestMP4Bytes(t)
+	sentinelToken := "resume-secret-pot-token-9988"
+	videoID := "abcdefghijk"
+	providerEndpoint := "http://127.0.0.1:4416"
+	var providerCalls int64
+	var mediaRequests int64
+	var failFirstMedia atomic.Bool
+	failFirstMedia.Store(true)
+
+	// Mock YouTube server
+	mockHTML := makeMockWatchPageWithDurationHTML(videoID, "https://rr1---sn-ab5sznzs.googlevideo.com/videoplayback?itag=18", "1")
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodPost && req.URL.Path == "/get_pot" {
+			atomic.AddInt64(&providerCalls, 1)
+			var reqBody map[string]any
+			_ = json.NewDecoder(req.Body).Decode(&reqBody)
+			resp := map[string]any{
+				"poToken":        sentinelToken,
+				"contentBinding": reqBody["content_binding"],
+				"expiresAt":      time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339),
+			}
+			bodyBytes, _ := json.Marshal(resp)
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				ContentLength: int64(len(bodyBytes)),
+				Body:          io.NopCloser(bytes.NewReader(bodyBytes)),
+				Request:       req,
+			}, nil
+		}
+
+		if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Host, ".googlevideo.com") {
+			atomic.AddInt64(&mediaRequests, 1)
+			if failFirstMedia.Load() {
+				return nil, errors.New("simulated network failure before download")
+			}
+
+			potParam := req.URL.Query().Get("pot")
+			if potParam != sentinelToken {
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader("403 missing or bad pot")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+				ContentLength: int64(len(mockMediaData)),
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		jobDir := filepath.Join(t.TempDir(), "resume-pot-job")
+		outPath := filepath.Join(t.TempDir(), "output.mp4")
+
+		// Run 1: Start job with -job-dir, but media fails
+		var stdout1, stderr1 bytes.Buffer
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-job-dir", jobDir,
+			"-out", outPath,
+		}, &stdout1, &stderr1)
+
+		if err == nil {
+			t.Fatal("expected failure on run 1 due to simulated network failure")
+		}
+
+		// Verify manifest on disk contains NO tokens, visitor IDs, or provider endpoints
+		rawManifestBytes, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+		if err != nil {
+			t.Fatalf("failed to read job.json: %v", err)
+		}
+		rawManifest := string(rawManifestBytes)
+		if strings.Contains(rawManifest, sentinelToken) {
+			t.Fatalf("job.json must not leak secret PO-token")
+		}
+		if strings.Contains(rawManifest, "secret-visitor-id") {
+			t.Fatalf("job.json must not leak visitor identifier")
+		}
+		if strings.Contains(rawManifest, providerEndpoint) {
+			t.Fatalf("job.json must not persist provider endpoint")
+		}
+
+		// Now enable media success for run 2
+		failFirstMedia.Store(false)
+
+		// Run 2: Resume with -resume-job and explicit runtime PO-token provider flags
+		var stdout2, stderr2 bytes.Buffer
+		err = Run(context.Background(), []string{
+			"download",
+			"-resume-job", jobDir,
+			"-po-token-provider", "http",
+			"-po-token-endpoint", providerEndpoint,
+		}, &stdout2, &stderr2)
+
+		if err != nil {
+			t.Fatalf("resume with PO-token provider failed: %v\nStderr was:\n%s", err, stderr2.String())
+		}
+
+		if calls := atomic.LoadInt64(&providerCalls); calls < 1 {
+			t.Fatalf("expected at least 1 provider call during resume, got %d", calls)
+		}
+
+		// Verify job.json still does not contain secret tokens or provider endpoint
+		rawManifestBytes2, err := os.ReadFile(filepath.Join(jobDir, "job.json"))
+		if err != nil {
+			t.Fatalf("failed to read completed job.json: %v", err)
+		}
+		rawManifest2 := string(rawManifestBytes2)
+		if strings.Contains(rawManifest2, sentinelToken) {
+			t.Fatalf("completed job.json must not leak secret PO-token")
+		}
+		if strings.Contains(rawManifest2, "secret-visitor-id") {
+			t.Fatalf("completed job.json must not leak visitor identifier")
+		}
+		if strings.Contains(rawManifest2, providerEndpoint) {
+			t.Fatalf("completed job.json must not persist provider endpoint")
+		}
+	})
+}
+
+func TestPOTokenCLI_InspectDoesNotCallProvider(t *testing.T) {
+	var providerCalls int64
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchPageHTML)),
+				Request:    req,
+			}, nil
+		}
+		if req.Method == http.MethodPost && req.URL.Path == "/get_pot" {
+			atomic.AddInt64(&providerCalls, 1)
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader("should not be called")),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		err := Run(context.Background(), []string{
+			"inspect",
+			"-url", "https://www.youtube.com/watch?v=abcdefghijk",
+			"-client", "web",
+			"-json",
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("inspect failed: %v\nStderr: %s", err, stderr.String())
+		}
+
+		if calls := atomic.LoadInt64(&providerCalls); calls != 0 {
+			t.Fatalf("inspect must never call PO-token provider, got %d calls", calls)
+		}
+
+		var resp youtube.InspectResponse
+		if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal inspect JSON: %v", err)
+		}
+		if resp.SchemaVersion != 1 {
+			t.Fatalf("unexpected schema version: %d", resp.SchemaVersion)
+		}
+	})
+}
+
+func TestPOTokenCLI_NoProviderBackwardCompatibility(t *testing.T) {
+	mockMediaData := createTestMP4Bytes(t)
+	videoID := "abcdefghijk"
+	var mediaRequests int64
+	var potParamSeen string
+
+	mockHTML := makeMockWatchPageWithDurationHTML(videoID, "https://rr1---sn-ab5sznzs.googlevideo.com/videoplayback?itag=18", "1")
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Host == "www.youtube.com" && req.URL.Path == "/watch" {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockHTML)),
+				Request:    req,
+			}, nil
+		}
+
+		if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Host, ".googlevideo.com") {
+			atomic.AddInt64(&mediaRequests, 1)
+			potParamSeen = req.URL.Query().Get("pot")
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+				ContentLength: int64(len(mockMediaData)),
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		outPath := filepath.Join(t.TempDir(), "output.mp4")
+
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-out", outPath,
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("download failed: %v\nStderr: %s", err, stderr.String())
+		}
+
+		if atomic.LoadInt64(&mediaRequests) < 1 {
+			t.Fatalf("expected media request to occur")
+		}
+		if potParamSeen != "" {
+			t.Fatalf("expected no pot parameter when provider is omitted, got %q", potParamSeen)
+		}
+	})
+}
+
+func createTestMP4Bytes(t *testing.T) []byte {
+	t.Helper()
+	sourceMP4 := filepath.Join(t.TempDir(), "source.mp4")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=25", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", sourceMP4)
+	if err := cmd.Run(); err != nil {
+		t.Skip("ffmpeg not available for CLI test:", err)
+	}
+	data, err := os.ReadFile(sourceMP4)
+	if err != nil {
+		t.Fatalf("failed to read test mp4: %v", err)
+	}
+	return data
 }
