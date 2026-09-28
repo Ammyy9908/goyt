@@ -706,7 +706,7 @@ func TestSolver_NodeBackend_ExplicitExecution(t *testing.T) {
 }
 
 func TestSolverBundle_EmbeddedDigestVerification(t *testing.T) {
-	const expectedSHA256 = "1d145209fe63050bef8fddffb518ab4c4bcb79b737d184d1e1982a2ae2925dd3"
+	const expectedSHA256 = "ca150f7905cca3c13275b1e15e5073ef50278e96ed153372e5826973574ba483"
 
 	// 1. Embedded bundle content must match the immutable pinned digest (integrity verification)
 	h := sha256.Sum256([]byte(solverBundleJS))

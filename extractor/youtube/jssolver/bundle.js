@@ -72,32 +72,70 @@ const { meriyah, astring } = lib;
  */
 var jsc=function(e,n){"use strict";function t(e,n){if(Array.isArray(n))return!!Array.isArray(e)&&(n.length===e.length&&n.every((n,o)=>t(e[o],n)));if("object"==typeof n){if(!e)return!n;if("or"in n)return n.or.some(n=>t(e,n));if("anykey"in n&&Array.isArray(n.anykey)){const o=Array.isArray(e)?e:Object.values(e);return n.anykey.every(e=>o.some(n=>t(n,e)))}for(const[o,s]of Object.entries(n))if(!t(e[o],s))return!1;return!0}return n===e}function o(n){return e.parse(n).body[0].expression}function s(e){let n,t=e[0],o=1;for(;o<e.length;){const s=e[o],r=e[o+1];if(o+=2,("optionalAccess"===s||"optionalCall"===s)&&null==t)return;"access"===s||"optionalAccess"===s?(n=t,t=r(t)):"call"!==s&&"optionalCall"!==s||(t=r((...e)=>t.call(n,...e)),n=void 0)}return t}const r={or:[{type:"ExpressionStatement",expression:{type:"AssignmentExpression",operator:"=",left:{or:[{type:"Identifier"},{type:"MemberExpression"}]},right:{type:"FunctionExpression",async:!1}}},{type:"FunctionDeclaration",async:!1,id:{type:"Identifier"}},{type:"VariableDeclaration",declarations:{anykey:[{type:"VariableDeclarator",init:{type:"FunctionExpression",async:!1}}]}}]},i={type:"ExpressionStatement",expression:{type:"CallExpression",callee:{type:"MemberExpression",object:{type:"Identifier"},property:{},optional:!1},arguments:[{type:"Literal",value:"alr"},{type:"Literal",value:"yes"}],optional:!1}};function p(e){if(!t(e,r))return null;const n=[];if("FunctionDeclaration"===e.type)e.id&&s([e,"access",e=>e.body,"optionalAccess",e=>e.body])&&n.push({name:e.id,statements:s([e,"access",e=>e.body,"optionalAccess",e=>e.body])});else if("ExpressionStatement"===e.type){if("AssignmentExpression"!==e.expression.type)return null;const t=e.expression.left,o=s([e.expression.right,"optionalAccess",e=>e.body,"optionalAccess",e=>e.body]);t&&o&&n.push({name:t,statements:o})}else if("VariableDeclaration"===e.type)for(const t of e.declarations){const e=t.id,o=s([t.init,"optionalAccess",e=>e.body,"optionalAccess",e=>e.body]);e&&o&&n.push({name:e,statements:o})}for(const{name:e,statements:o}of n)if(t(o,{anykey:[i]}))return a(e);return null}function a(e){return o(`\n({sig, n}) => {\n  const url = (${n.generate(e)})("https://youtube.com/watch?v=yt-dlp-wins", "s", sig ? encodeURIComponent(sig) : undefined);\n  url.set("n", n);\n  const proto = Object.getPrototypeOf(url);\n  const keys = Object.keys(proto).concat(Object.getOwnPropertyNames(proto));\n  for (const key of keys) {\n    if (!["constructor", "set", "get", "clone"].includes(key)) {\n      url[key]();\n      break;\n    }\n  }\n  const s = url.get("s");\n  return {\n    sig: s ? decodeURIComponent(s) : null,\n    n: url.get("n") ?? null,\n  };\n}\n`)}const l=e.parse('\nif (typeof globalThis.XMLHttpRequest === "undefined") {\n    globalThis.XMLHttpRequest = { prototype: {} };\n}\nif (typeof URL === "undefined") {\n    globalThis.location = {\n        hash: "",\n        host: "www.youtube.com",\n        hostname: "www.youtube.com",\n        href: "https://www.youtube.com/watch?v=yt-dlp-wins",\n        origin: "https://www.youtube.com",\n        password: "",\n        pathname: "/watch",\n        port: "",\n        protocol: "https:",\n        search: "?v=yt-dlp-wins",\n        username: "",\n    };\n} else {\n    globalThis.location = new URL("https://www.youtube.com/watch?v=yt-dlp-wins");\n}\nif (typeof globalThis.document === "undefined") {\n    globalThis.document = Object.create(null);\n}\nif (typeof globalThis.navigator === "undefined") {\n    globalThis.navigator = Object.create(null);\n}\nif (typeof globalThis.self === "undefined") {\n    globalThis.self = globalThis;\n}\nif (typeof globalThis.window === "undefined") {\n    globalThis.window = globalThis;\n}\n').body;function c(e){let n,t=e[0],o=1;for(;o<e.length;){const s=e[o],r=e[o+1];if(o+=2,("optionalAccess"===s||"optionalCall"===s)&&null==t)return;"access"===s||"optionalAccess"===s?(n=t,t=r(t)):"call"!==s&&"optionalCall"!==s||(t=r((...e)=>t.call(n,...e)),n=void 0)}return t}function u(t){const o=e.parse(t),s=function(e){const n=e.body,t=(()=>{switch(n.length){case 1:{const e=n[0];if("ExpressionStatement"===c([e,"optionalAccess",e=>e.type])&&"CallExpression"===e.expression.type&&"MemberExpression"===e.expression.callee.type&&"FunctionExpression"===e.expression.callee.object.type)return e.expression.callee.object.body;break}case 2:{const e=n[1];if("ExpressionStatement"===c([e,"optionalAccess",e=>e.type])&&"CallExpression"===e.expression.type&&"FunctionExpression"===e.expression.callee.type){const n=e.expression.callee.body;return n.body.splice(0,1),n}break}}throw"unexpected structure"})();return t.body=t.body.filter(e=>"ExpressionStatement"!==e.type||("AssignmentExpression"===e.expression.type||"Literal"===e.expression.type)),t.body}(o),r=function(e){const n={n:[],sig:[]};for(const t of e){const e=p(t);e&&(n.n.push(y(e,{type:"Identifier",name:"n"})),n.sig.push(y(e,{type:"Identifier",name:"sig"})))}return n}(s);for(const[e,n]of Object.entries(r))s.push({type:"ExpressionStatement",expression:{type:"AssignmentExpression",operator:"=",left:{type:"MemberExpression",computed:!1,object:{type:"Identifier",name:"_result"},property:{type:"Identifier",name:e},optional:!1},right:f(n)}});return o.body.splice(0,0,...l),n.generate(o)}function y(e,n){return{type:"ArrowFunctionExpression",params:[n],body:{type:"MemberExpression",object:{type:"CallExpression",callee:e,arguments:[{type:"ObjectExpression",properties:[{type:"Property",key:n,value:n,kind:"init",computed:!1,method:!1,shorthand:!0}]}],optional:!1},computed:!1,property:n,optional:!1},async:!1,expression:!0,generator:!1}}function f(e){return o(`\n(_input) => {\n  const _results = new Set();\n  const errors = [];\n  for (const _generator of ${n.generate({type:"ArrayExpression",elements:e})}) {\n    try {\n      _results.add(_generator(_input));\n    } catch (e) {\n      errors.push(e);\n    }\n  }\n  if (!_results.size) {\n    throw \`no solutions: \${errors.join(", ")}\`;\n  }\n  if (_results.size !== 1) {\n    throw \`invalid solutions: \${[..._results].map(x => JSON.stringify(x)).join(", ")}\`;\n  }\n  return _results.values().next().value;\n}\n`)}return function(e){const n="player"===e.type?u(e.player):e.preprocessed_player,t=function(e){const n={n:null,sig:null};return Function("_result",e)(n),n}(n),o={type:"result",responses:e.requests.map(e=>{if(!function(e,...n){return n.includes(e)}(e.type,"n","sig"))return{type:"error",error:`Unknown request type: ${e.type}`};const n=t[e.type];if(!n)return{type:"error",error:`Failed to extract ${e.type} function`};try{return{type:"result",data:Object.fromEntries(e.challenges.map(e=>[e,n(e)]))}}catch(e){return{type:"error",error:e instanceof Error?`${e.message}\n${e.stack}`:`${e}`}}})};return"player"===e.type&&e.output_preprocessed&&(o.preprocessed_player=n),o}}(meriyah,astring);
 
+function readStdinSync() {
+    if (typeof Deno !== "undefined" && Deno.stdin && typeof Deno.stdin.readSync === "function") {
+        const chunks = [];
+        const buf = new Uint8Array(64 * 1024);
+        while (true) {
+            const n = Deno.stdin.readSync(buf);
+            if (n === null || n === 0) break;
+            chunks.push(buf.slice(0, n));
+        }
+        const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+        const combined = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const c of chunks) {
+            combined.set(c, offset);
+            offset += c.length;
+        }
+        return new TextDecoder().decode(combined);
+    }
+    const fs = require("fs");
+    return fs.readFileSync(0, "utf8");
+}
+
+function writeStdout(str) {
+    if (typeof process !== "undefined" && process.stdout && typeof process.stdout.write === "function") {
+        process.stdout.write(str);
+    } else if (typeof Deno !== "undefined" && Deno.stdout && typeof Deno.stdout.writeSync === "function") {
+        Deno.stdout.writeSync(new TextEncoder().encode(str));
+    }
+}
+
+function exitProcess(code) {
+    if (typeof process !== "undefined" && typeof process.exit === "function") {
+        process.exit(code);
+    } else if (typeof Deno !== "undefined" && typeof Deno.exit === "function") {
+        Deno.exit(code);
+    }
+}
+
 function run() {
     let inputRaw;
     try {
-        inputRaw = fs.readFileSync(0, "utf8");
+        inputRaw = readStdinSync();
     } catch (err) {
-        process.stdout.write(JSON.stringify({ protocol_version: 1, error: "failed to read stdin: " + (err.message || String(err)) }) + "\n");
-        process.exit(0);
+        writeStdout(JSON.stringify({ protocol_version: 1, error: "failed to read stdin: " + (err.message || String(err)) }) + "\n");
+        exitProcess(0);
     }
 
     let input;
     try {
         input = JSON.parse(inputRaw);
     } catch (err) {
-        process.stdout.write(JSON.stringify({ protocol_version: 1, error: "invalid json input: " + (err.message || String(err)) }) + "\n");
-        process.exit(0);
+        writeStdout(JSON.stringify({ protocol_version: 1, error: "invalid json input: " + (err.message || String(err)) }) + "\n");
+        exitProcess(0);
     }
 
     if (!input || typeof input !== "object" || input.protocol_version !== 1) {
-        process.stdout.write(JSON.stringify({ protocol_version: 1, error: "unsupported protocol version" }) + "\n");
-        process.exit(0);
+        writeStdout(JSON.stringify({ protocol_version: 1, error: "unsupported protocol version" }) + "\n");
+        exitProcess(0);
     }
 
     const playerSource = input.player || "";
     if (!playerSource) {
-        process.stdout.write(JSON.stringify({ protocol_version: 1, error: "empty player script source" }) + "\n");
-        process.exit(0);
+        writeStdout(JSON.stringify({ protocol_version: 1, error: "empty player script source" }) + "\n");
+        exitProcess(0);
     }
 
     const sigChallenges = Array.isArray(input.signatures) ? input.signatures : [];
@@ -117,20 +155,20 @@ function run() {
     }
 
     if (req.requests.length === 0) {
-        process.stdout.write(JSON.stringify({ protocol_version: 1, signatures: {}, n_params: {}, errors: {} }) + "\n");
-        process.exit(0);
+        writeStdout(JSON.stringify({ protocol_version: 1, signatures: {}, n_params: {}, errors: {} }) + "\n");
+        exitProcess(0);
     }
 
     try {
         const res = jsc(req);
         if (!res || typeof res !== "object") {
-            process.stdout.write(JSON.stringify({ protocol_version: 1, error: "solver returned invalid response" }) + "\n");
-            process.exit(0);
+            writeStdout(JSON.stringify({ protocol_version: 1, error: "solver returned invalid response" }) + "\n");
+            exitProcess(0);
         }
 
         if (res.type === "error") {
-            process.stdout.write(JSON.stringify({ protocol_version: 1, error: res.error || "solver returned error" }) + "\n");
-            process.exit(0);
+            writeStdout(JSON.stringify({ protocol_version: 1, error: res.error || "solver returned error" }) + "\n");
+            exitProcess(0);
         }
 
         const out = {
@@ -159,9 +197,9 @@ function run() {
             }
         }
 
-        process.stdout.write(JSON.stringify(out) + "\n");
+        writeStdout(JSON.stringify(out) + "\n");
     } catch (err) {
-        process.stdout.write(JSON.stringify({
+        writeStdout(JSON.stringify({
             protocol_version: 1,
             error: "solver execution failed: " + (err instanceof Error ? err.message : String(err))
         }) + "\n");

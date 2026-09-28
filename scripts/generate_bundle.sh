@@ -20,7 +20,7 @@
 # - QuickJS: 2021+
 #
 # Target Bundle: extractor/youtube/jssolver/bundle.js
-# Pinned SHA-256: 1d145209fe63050bef8fddffb518ab4c4bcb79b737d184d1e1982a2ae2925dd3
+# Pinned SHA-256: ca150f7905cca3c13275b1e15e5073ef50278e96ed153372e5826973574ba483
 # ==============================================================================
 
 set -euo pipefail
@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 GENERATOR_DIR="${SCRIPT_DIR}/bundle_generator"
 COMMITTED_BUNDLE="${ROOT_DIR}/extractor/youtube/jssolver/bundle.js"
-EXPECTED_SHA256="1d145209fe63050bef8fddffb518ab4c4bcb79b737d184d1e1982a2ae2925dd3"
+EXPECTED_SHA256="ca150f7905cca3c13275b1e15e5073ef50278e96ed153372e5826973574ba483"
 
 compute_sha256() {
     local file="$1"
