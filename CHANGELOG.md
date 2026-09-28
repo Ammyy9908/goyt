@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Replaceable Proof-of-Origin (PO) token provider interface `POTokenProvider` in `extractor/youtube` with structured request scopes (`POTokenRequest`: client, context, video ID, visitor data) and validated results (`POTokenResult`: token, scope metadata, optional expiration), supporting constructor injection via `WithPOTokenProvider` and dynamic concurrency-safe configuration via `SetPOTokenProvider`.
+- Fixture-verified request placement for `web` client: placing player PO-tokens into `serviceIntegrityDimensions.poToken` at the root of `v1/player` request bodies, and placing GVS media PO-tokens into `pot` query parameters on `googlevideo.com` media URLs, with extraction-scoped reuse and strict rejection of expired or scope-mismatched tokens.
+- Structured PO-token diagnostic error codes (`po_token_provider_unavailable`, `po_token_unavailable`, `po_token_scope_mismatch`, `po_token_expired`, `po_token_provider_failed`, `po_token_invalid`) providing safe public diagnostic messages without leaking raw token strings or secrets.
+- Request-scoped destination policy enforcement in `Resource.ValidateDestination` and `Downloader` (`CheckRedirect` and initial request validation): attaching strict HTTPS Google Video scope validation to GVS PO-token resources (`*.googlevideo.com`, `googlevideo.com`), propagating policy across all redirect hops via request context (even if intermediate hops drop query parameters), rejecting userinfo, custom ports, insecure HTTP, `youtube.com` subdomains, `youtu.be`, and untrusted redirect targets before requests are sent, while keeping generic downloads without destination policy unrestricted.
+
+### Changed
+
+- Updated inspection limitations in text reports and Schema 1 JSON outputs, accurately reporting that inspection reports detected challenges without solving, downloads can optionally solve supported challenges using `-js-runtime`, and a PO-token provider interface is available (player, gvs contexts) without built-in generation.
+
 ## [0.1.0-rc.8] - 2026-09-28
 
 ### Added
@@ -51,7 +64,7 @@
 ### Fixed
 
 - Handled Oracle Ubuntu and cloud host bot-check responses descriptively, explaining that the selected client received a bot-check challenge without claiming to bypass or fix that response, promising automatic fallback, or advising infinite retries.
-- Corrected stale inspection limitations in text reports and Schema 1 JSON outputs, replacing the blanket no-solver statement with accurate, separate declarations that inspection reports detected challenges without solving, downloads can optionally solve supported challenges using `-js-runtime`, and no PO-token provider is implemented.
+- Corrected stale inspection limitations in text reports and Schema 1 JSON outputs, accurately reporting that inspection reports detected challenges without solving and downloads can optionally solve supported challenges using `-js-runtime`.
 
 ## [0.1.0-rc.7] - 2026-09-27
 

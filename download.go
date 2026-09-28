@@ -196,6 +196,17 @@ func NewDownloader(client *http.Client) *Downloader {
 			return errors.New("goyt: insecure redirect")
 		}
 
+		if req.URL.User != nil {
+			return errors.New("goyt: redirect target with userinfo rejected")
+		}
+
+		// Enforce request-scoped destination policy across all redirect hops
+		if policy, ok := req.Context().Value(destinationPolicyKey{}).(func(*url.URL) error); ok && policy != nil {
+			if err := policy(req.URL); err != nil {
+				return fmt.Errorf("goyt: untrusted redirect target: %w", err)
+			}
+		}
+
 		if previousRedirect != nil {
 			if err := previousRedirect(req, via); err != nil {
 				return err
@@ -213,6 +224,8 @@ func NewDownloader(client *http.Client) *Downloader {
 
 	return &Downloader{client: &cloned}
 }
+
+type destinationPolicyKey struct{}
 
 func origin(u *url.URL) string {
 	port := u.Port()
@@ -324,6 +337,12 @@ func (d *Downloader) Download(
 		(u.Scheme != "http" && u.Scheme != "https") ||
 		u.User != nil {
 		return nil, errors.New("goyt: invalid resource URL")
+	}
+
+	if resource.ValidateDestination != nil {
+		if err := resource.ValidateDestination(u); err != nil {
+			return nil, fmt.Errorf("goyt: invalid destination: %w", err)
+		}
 	}
 
 	// Copy headers so retries use the same caller-supplied values.
@@ -478,6 +497,10 @@ func (d *Downloader) attempt(
 	reqCtx, watcher := newStallWatcher(ctx, options.StallTimeout)
 	if watcher != nil {
 		defer watcher.Stop()
+	}
+
+	if resource.ValidateDestination != nil {
+		reqCtx = context.WithValue(reqCtx, destinationPolicyKey{}, resource.ValidateDestination)
 	}
 
 	req, err := http.NewRequestWithContext(

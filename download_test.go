@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -503,5 +504,356 @@ func TestDownloadRetryDiagnostics_ResumePartial206(t *testing.T) {
 		if progressEvents[i] < progressEvents[i-1] {
 			t.Fatalf("resumed download should not have progress decrease: %v", progressEvents)
 		}
+	}
+}
+
+func TestDownloadRedirectSafety_RejectedTargetsReceiveZeroRequests(t *testing.T) {
+	var rejectedTargetRequests int64
+	rejectedTargetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&rejectedTargetRequests, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("untrusted payload"))
+	}))
+	defer rejectedTargetServer.Close()
+
+	// 1. Insecure redirect from HTTPS to HTTP with pot=<sentinel>: target must receive ZERO requests
+	sentinelToken := "SUPER_SECRET_REDIRECT_SENTINEL_POT_9911"
+	tlsRedirectServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, rejectedTargetServer.URL+"/insecure?pot="+sentinelToken, http.StatusFound)
+	}))
+	defer tlsRedirectServer.Close()
+
+	destPath := filepath.Join(t.TempDir(), "target.mp4")
+	origCallerClient := tlsRedirectServer.Client()
+	if origCallerClient.CheckRedirect != nil {
+		t.Fatal("expected nil CheckRedirect on freshly created test client")
+	}
+	downloader := NewDownloader(origCallerClient)
+
+	// Verify caller-owned client is not mutated by NewDownloader
+	if origCallerClient.CheckRedirect != nil {
+		t.Fatal("NewDownloader mutated caller-owned http.Client.CheckRedirect")
+	}
+
+	_, err := downloader.Download(
+		context.Background(),
+		Resource{URL: tlsRedirectServer.URL + "/start"},
+		destPath,
+		DownloadOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected insecure redirect error, got nil")
+	}
+	sanitized := SanitizeError(err)
+	if !strings.Contains(sanitized, "insecure redirect") {
+		t.Fatalf("expected 'insecure redirect' error, got: %v", sanitized)
+	}
+	if strings.Contains(sanitized, sentinelToken) {
+		t.Fatalf("sanitized download error leaked sentinel token: %v", sanitized)
+	}
+	if count := atomic.LoadInt64(&rejectedTargetRequests); count != 0 {
+		t.Fatalf("rejected insecure redirect target received %d requests, want 0", count)
+	}
+
+	// 2. Redirect with userinfo in target URL: target must receive ZERO requests
+	userinfoRedirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parsed, _ := url.Parse(rejectedTargetServer.URL)
+		parsed.User = url.UserPassword("attacker", "secret")
+		http.Redirect(w, r, parsed.String()+"/userinfo?pot="+sentinelToken, http.StatusFound)
+	}))
+	defer userinfoRedirectServer.Close()
+
+	destPath2 := filepath.Join(t.TempDir(), "target2.mp4")
+	downloader2 := NewDownloader(userinfoRedirectServer.Client())
+
+	_, err2 := downloader2.Download(
+		context.Background(),
+		Resource{URL: userinfoRedirectServer.URL + "/start"},
+		destPath2,
+		DownloadOptions{},
+	)
+	if err2 == nil {
+		t.Fatal("expected userinfo redirect error, got nil")
+	}
+	sanitized2 := SanitizeError(err2)
+	if !strings.Contains(sanitized2, "userinfo rejected") {
+		t.Fatalf("expected 'userinfo rejected' error, got: %v", sanitized2)
+	}
+	if strings.Contains(sanitized2, sentinelToken) {
+		t.Fatalf("sanitized download error leaked sentinel token: %v", sanitized2)
+	}
+	if count := atomic.LoadInt64(&rejectedTargetRequests); count != 0 {
+		t.Fatalf("rejected userinfo redirect target received %d requests, want 0", count)
+	}
+}
+
+type downloadTestRoundTripper func(req *http.Request) (*http.Response, error)
+
+func (f downloadTestRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestDownloadRedirectSafety_DestinationPolicyEnforcedOnRedirect(t *testing.T) {
+	sentinelToken := "SUPER_SECRET_TOKEN_BEARING_REDIRECT_SENTINEL_9988"
+	var untrustedTargetRequests int64
+	var initialPermittedRequests int64
+
+	client := &http.Client{
+		Transport: downloadTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Hostname() == "allowed.example" {
+				atomic.AddInt64(&initialPermittedRequests, 1)
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header: http.Header{
+						"Location": []string{"https://untrusted.example/media?token=" + sentinelToken},
+					},
+					Body:    io.NopCloser(strings.NewReader("")),
+					Request: req,
+				}, nil
+			}
+			if req.URL.Hostname() == "untrusted.example" {
+				atomic.AddInt64(&untrustedTargetRequests, 1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("untrusted payload")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("404")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	destPath := filepath.Join(t.TempDir(), "target.mp4")
+	downloader := NewDownloader(client)
+
+	policy := func(target *url.URL) error {
+		if target.Hostname() != "allowed.example" {
+			return fmt.Errorf("host %s not permitted", target.Hostname())
+		}
+		return nil
+	}
+
+	_, err := downloader.Download(
+		context.Background(),
+		Resource{
+			URL:                 "https://allowed.example/media?token=" + sentinelToken,
+			ValidateDestination: policy,
+		},
+		destPath,
+		DownloadOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected error for redirect to untrusted host, got nil")
+	}
+
+	sanitized := SanitizeError(err)
+	if !strings.Contains(sanitized, "untrusted redirect target") {
+		t.Fatalf("expected untrusted redirect error, got: %v (sanitized: %s)", err, sanitized)
+	}
+	if strings.Contains(sanitized, sentinelToken) {
+		t.Fatalf("sanitized error leaked sentinel token: %s", sanitized)
+	}
+
+	// Assert: Initial permitted host received 1 request
+	if initial := atomic.LoadInt64(&initialPermittedRequests); initial != 1 {
+		t.Fatalf("initial permitted host expected 1 request, got %d", initial)
+	}
+	// Assert: Untrusted target received ZERO requests
+	if untrusted := atomic.LoadInt64(&untrustedTargetRequests); untrusted != 0 {
+		t.Fatalf("untrusted target received %d requests, want 0", untrusted)
+	}
+}
+
+func TestDownloadRedirectSafety_DestinationPolicyPreservedAcrossHopDroppingParams(t *testing.T) {
+	sentinelToken := "SUPER_SECRET_MULTI_HOP_SENTINEL_TOKEN_7744"
+	var hop0Requests int64
+	var hop1Requests int64
+	var hop2UntrustedRequests int64
+
+	client := &http.Client{
+		Transport: downloadTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Hostname() {
+			case "allowed-1.example":
+				atomic.AddInt64(&hop0Requests, 1)
+				// Hop 0 redirects to allowed Hop 1, dropping query parameters
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header: http.Header{
+						"Location": []string{"https://allowed-2.example/media_hop1"},
+					},
+					Body:    io.NopCloser(strings.NewReader("")),
+					Request: req,
+				}, nil
+			case "allowed-2.example":
+				atomic.AddInt64(&hop1Requests, 1)
+				// Hop 1 (which has no query params) redirects to untrusted Hop 2
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header: http.Header{
+						"Location": []string{"https://untrusted.example/media"},
+					},
+					Body:    io.NopCloser(strings.NewReader("")),
+					Request: req,
+				}, nil
+			case "untrusted.example":
+				atomic.AddInt64(&hop2UntrustedRequests, 1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("untrusted payload")),
+					Request:    req,
+				}, nil
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("404")),
+					Request:    req,
+				}, nil
+			}
+		}),
+	}
+
+	destPath := filepath.Join(t.TempDir(), "target_multihop.mp4")
+	downloader := NewDownloader(client)
+
+	policy := func(target *url.URL) error {
+		if target.Hostname() != "allowed-1.example" && target.Hostname() != "allowed-2.example" {
+			return fmt.Errorf("host %s not in allowed set", target.Hostname())
+		}
+		return nil
+	}
+
+	_, err := downloader.Download(
+		context.Background(),
+		Resource{
+			URL:                 "https://allowed-1.example/media?pot=" + sentinelToken,
+			ValidateDestination: policy,
+		},
+		destPath,
+		DownloadOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected error on multi-hop redirect to untrusted host, got nil")
+	}
+
+	sanitized := SanitizeError(err)
+	if !strings.Contains(sanitized, "untrusted redirect target") {
+		t.Fatalf("expected untrusted redirect error, got: %v (sanitized: %s)", err, sanitized)
+	}
+
+	// Assert: Hop 0 and Hop 1 received requests
+	if h0 := atomic.LoadInt64(&hop0Requests); h0 != 1 {
+		t.Fatalf("hop 0 expected 1 request, got %d", h0)
+	}
+	if h1 := atomic.LoadInt64(&hop1Requests); h1 != 1 {
+		t.Fatalf("hop 1 expected 1 request, got %d", h1)
+	}
+	// Assert: Untrusted Hop 2 received ZERO requests
+	if h2 := atomic.LoadInt64(&hop2UntrustedRequests); h2 != 0 {
+		t.Fatalf("untrusted hop 2 received %d requests, want 0", h2)
+	}
+}
+
+func TestDownload_GenericOrdinaryDownloadWithPotQueryParamNotRestricted(t *testing.T) {
+	var initialRequests int64
+	var targetRequests int64
+	content := "generic non-token media content bytes"
+
+	client := &http.Client{
+		Transport: downloadTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Hostname() == "example.com" {
+				atomic.AddInt64(&initialRequests, 1)
+				// Ordinary redirect between generic HTTPS hosts with a ?pot=example query param
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header: http.Header{
+						"Location": []string{"https://cdn.example.org/stream.mp4?pot=example"},
+					},
+					Body:    io.NopCloser(strings.NewReader("")),
+					Request: req,
+				}, nil
+			}
+			if req.URL.Hostname() == "cdn.example.org" {
+				atomic.AddInt64(&targetRequests, 1)
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					ContentLength: int64(len(content)),
+					Body:          io.NopCloser(strings.NewReader(content)),
+					Request:       req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader("404")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	destPath := filepath.Join(t.TempDir(), "generic_pot.mp4")
+	downloader := NewDownloader(client)
+
+	res, err := downloader.Download(
+		context.Background(),
+		Resource{URL: "https://example.com/stream.mp4?pot=example"}, // No ValidateDestination policy
+		destPath,
+		DownloadOptions{},
+	)
+	if err != nil {
+		t.Fatalf("generic download with pot parameter failed unexpectedly: %v", err)
+	}
+	if res.SizeBytes != int64(len(content)) {
+		t.Fatalf("expected size %d, got %d", len(content), res.SizeBytes)
+	}
+
+	if initial := atomic.LoadInt64(&initialRequests); initial != 1 {
+		t.Fatalf("initial generic host expected 1 request, got %d", initial)
+	}
+	if target := atomic.LoadInt64(&targetRequests); target != 1 {
+		t.Fatalf("target generic host expected 1 request, got %d", target)
+	}
+	assertDownloadFile(t, destPath, content)
+}
+
+func TestDownload_InitialDestinationPolicyRejection(t *testing.T) {
+	var networkRequests int64
+	client := &http.Client{
+		Transport: downloadTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+			atomic.AddInt64(&networkRequests, 1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("data")),
+				Request:    req,
+			}, nil
+		}),
+	}
+
+	downloader := NewDownloader(client)
+	destPath := filepath.Join(t.TempDir(), "rejected.mp4")
+
+	policy := func(target *url.URL) error {
+		return errors.New("initial destination rejected by policy")
+	}
+
+	_, err := downloader.Download(
+		context.Background(),
+		Resource{
+			URL:                 "https://untrusted.example/stream.mp4",
+			ValidateDestination: policy,
+		},
+		destPath,
+		DownloadOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected immediate rejection by destination policy, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid destination") {
+		t.Fatalf("expected invalid destination error, got: %v", err)
+	}
+	if networkRequests != 0 {
+		t.Fatalf("expected zero network requests for initial policy rejection, got %d", networkRequests)
 	}
 }

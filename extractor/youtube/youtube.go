@@ -43,6 +43,13 @@ func WithChallengeSolver(solver ChallengeSolver) Option {
 	}
 }
 
+// WithPOTokenProvider configures a POTokenProvider on the Extractor.
+func WithPOTokenProvider(provider POTokenProvider) Option {
+	return func(e *Extractor) {
+		e.poProvider = provider
+	}
+}
+
 // WithHTTPClient configures an http.Client on the Extractor.
 func WithHTTPClient(client *http.Client) Option {
 	return func(e *Extractor) {
@@ -56,6 +63,7 @@ type Extractor struct {
 	mu          sync.RWMutex
 	client      *http.Client
 	solver      ChallengeSolver
+	poProvider  POTokenProvider
 	diagnostics map[string]FormatDiagnostics
 }
 
@@ -87,6 +95,21 @@ func (e *Extractor) SetSolver(solver ChallengeSolver) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.solver = solver
+}
+
+// POTokenProvider returns the configured POTokenProvider, or nil.
+// It is safe for concurrent use.
+func (e *Extractor) POTokenProvider() POTokenProvider {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.poProvider
+}
+
+// SetPOTokenProvider updates the POTokenProvider on the Extractor safely for concurrent use.
+func (e *Extractor) SetPOTokenProvider(provider POTokenProvider) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.poProvider = provider
 }
 
 // FormatDiagnostics returns the challenge resolution diagnostics for a specific format ID from the latest extraction.
@@ -488,7 +511,7 @@ func buildReport(id string, player *playerResponse) *Report {
 			"Page-response inspection only; format inventory may be incomplete.",
 			"Inspection reports detected JavaScript challenges without executing solving.",
 			"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
-			"No PO-token provider is implemented.",
+			"PO-token provider interface is available (player, gvs contexts); no built-in token generator is supplied.",
 			"Discovered URLs have not been verified for playback or downloading.",
 		},
 	}

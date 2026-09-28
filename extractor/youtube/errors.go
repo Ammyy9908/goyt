@@ -21,6 +21,12 @@ const (
 	ErrCodeManifestUnavailable        = "manifest_unavailable"
 	ErrCodePlayerScriptUnavailable    = "player_script_unavailable"
 	ErrCodeChallengeSolverFailed      = "challenge_solver_failed"
+	ErrCodePOTokenProviderUnavailable = "po_token_provider_unavailable"
+	ErrCodePOTokenUnavailable         = "po_token_unavailable"
+	ErrCodePOTokenScopeMismatch       = "po_token_scope_mismatch"
+	ErrCodePOTokenExpired             = "po_token_expired"
+	ErrCodePOTokenProviderFailed      = "po_token_provider_failed"
+	ErrCodePOTokenInvalid             = "po_token_invalid"
 	ErrCodeInvalidPlayerResponse      = "invalid_player_response"
 	ErrCodeExtractionRequestFailed    = "extraction_request_failed"
 	ErrCodeContextCanceled            = "context_canceled"
@@ -188,6 +194,24 @@ func classifyExtractionFailure(client string, err error) error {
 	} else if errors.Is(err, ErrInvalidSolverResult) || strings.Contains(errStr, "challenge solver") || strings.Contains(errStr, "solver") {
 		code = ErrCodeChallengeSolverFailed
 		publicMsg = fmt.Sprintf("youtube: %s client challenge solver failed", client)
+	} else if errors.Is(err, ErrPOTokenProviderFailed) || strings.Contains(strings.ToLower(errStr), "po-token provider failed") || strings.Contains(strings.ToLower(errStr), "potokenproviderfailed") {
+		code = ErrCodePOTokenProviderFailed
+		publicMsg = fmt.Sprintf("youtube: %s PO-token provider failed", client)
+	} else if errors.Is(err, ErrPOTokenScopeMismatch) || strings.Contains(strings.ToLower(errStr), "po-token scope mismatch") {
+		code = ErrCodePOTokenScopeMismatch
+		publicMsg = fmt.Sprintf("youtube: %s PO-token scope mismatch", client)
+	} else if errors.Is(err, ErrPOTokenExpired) || strings.Contains(strings.ToLower(errStr), "po-token expired") {
+		code = ErrCodePOTokenExpired
+		publicMsg = fmt.Sprintf("youtube: %s PO-token expired", client)
+	} else if errors.Is(err, ErrPOTokenInvalid) || strings.Contains(strings.ToLower(errStr), "po-token invalid") {
+		code = ErrCodePOTokenInvalid
+		publicMsg = fmt.Sprintf("youtube: %s PO-token invalid", client)
+	} else if errors.Is(err, ErrPOTokenUnavailable) || strings.Contains(strings.ToLower(errStr), "po-token unavailable") {
+		code = ErrCodePOTokenUnavailable
+		publicMsg = fmt.Sprintf("youtube: %s PO-token unavailable", client)
+	} else if errors.Is(err, ErrNoPOTokenProviderConfigured) {
+		code = ErrCodePOTokenProviderUnavailable
+		publicMsg = fmt.Sprintf("youtube: %s PO-token provider not configured", client)
 	} else if match := httpStatusRegex.FindStringSubmatch(errStr); len(match) == 2 {
 		publicMsg = fmt.Sprintf("youtube: %s player API returned HTTP %s", client, match[1])
 	} else if strings.Contains(errStr, "different video ID") {

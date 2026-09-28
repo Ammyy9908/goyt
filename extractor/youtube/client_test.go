@@ -97,7 +97,7 @@ func TestGetClientProfile(t *testing.T) {
 	if web.Name != ClientWeb {
 		t.Fatalf("expected name %s, got %s", ClientWeb, web.Name)
 	}
-	if !web.Capabilities.MetadataInspection || !web.Capabilities.DirectExtraction || !web.Capabilities.HLSExtraction {
+	if !web.Capabilities.MetadataInspection || !web.Capabilities.DirectExtraction || !web.Capabilities.HLSExtraction || !web.Capabilities.POTokenProvider {
 		t.Fatalf("web capabilities mismatch: %+v", web.Capabilities)
 	}
 
@@ -133,16 +133,17 @@ func TestInspectionLimitations_WebAndVisionOS(t *testing.T) {
 	player.PlayabilityStatus.Status = "OK"
 
 	staleLimitation := "No JavaScript challenge solver or PO-token provider is implemented."
+	staleLimitation2 := "No PO-token provider is implemented."
 	expectedStatements := []string{
 		"Inspection reports detected JavaScript challenges without executing solving.",
 		"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
-		"No PO-token provider is implemented.",
+		"PO-token provider interface is available (player, gvs contexts); no built-in token generator is supplied.",
 	}
 
 	// 1. Test Web report
 	webReport := buildReport("abcdefghijk", player)
 	for _, lim := range webReport.Limitations {
-		if lim == staleLimitation {
+		if lim == staleLimitation || lim == staleLimitation2 {
 			t.Errorf("web report contains stale limitation: %q", lim)
 		}
 	}
@@ -166,10 +167,10 @@ func TestInspectionLimitations_WebAndVisionOS(t *testing.T) {
 	}
 	vosReport.Limitations = append(
 		vosReport.Limitations,
-		"Visitor identifier propagated from a fresh watch page; no account cookies or PO-token provider.",
+		"Visitor identifier propagated from a fresh watch page; no account cookies or built-in PO-token generator.",
 	)
 	for _, lim := range vosReport.Limitations {
-		if lim == staleLimitation {
+		if lim == staleLimitation || lim == staleLimitation2 {
 			t.Errorf("visionos report contains stale limitation: %q", lim)
 		}
 	}
@@ -196,7 +197,7 @@ func TestInspectionLimitations_WebAndVisionOS(t *testing.T) {
 	}
 	for _, res := range jsonResp.Results {
 		for _, lim := range res.Limitations {
-			if lim == staleLimitation {
+			if lim == staleLimitation || lim == staleLimitation2 {
 				t.Errorf("json result for %s contains stale limitation: %q", res.Client, lim)
 			}
 		}
@@ -239,7 +240,7 @@ func TestInspectionLimitations_RestrictedPlayback(t *testing.T) {
 	expectedStatements := []string{
 		"Inspection reports detected JavaScript challenges without executing solving.",
 		"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
-		"No PO-token provider is implemented.",
+		"PO-token provider interface is available (player, gvs contexts); no built-in token generator is supplied.",
 	}
 	for _, expected := range expectedStatements {
 		found := false

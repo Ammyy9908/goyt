@@ -2,6 +2,7 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -56,19 +57,25 @@ func (e *Extractor) ExtractDownloadableResult(
 
 	profile, _ := GetClientProfile(clientName)
 
-	// Snapshot configured solver for the duration of this extraction.
+	// Snapshot configured solver and PO-token provider for the duration of this extraction.
 	solver := e.Solver()
+	poProvider := e.POTokenProvider()
 
 	var watchHTML []byte
 	var player *playerResponse
+	var visitor string
 
 	if clientName == ClientWeb {
 		player, watchHTML, err = e.fetchWatchPagePlayerAndHTML(ctx, id)
 		if err != nil {
 			return nil, classifyExtractionFailure(clientName, err)
 		}
+		if len(watchHTML) > 0 {
+			visitor, _ = parseVisitorData(watchHTML)
+		}
 	} else {
-		visitor, vErr := e.fetchVisitorData(ctx, id)
+		var vErr error
+		visitor, vErr = e.fetchVisitorData(ctx, id)
 		if vErr != nil {
 			return nil, classifyExtractionFailure(clientName, vErr)
 		}
@@ -125,6 +132,31 @@ func (e *Extractor) ExtractDownloadableResult(
 
 	formatDiags := make(map[string]FormatDiagnostics)
 
+	// Fetch GVS PO-token once for this extraction scope if supported and configured.
+	var gvsPOToken string
+	if poProvider != nil && ClientSupportsPOTokenContext(clientName, POTokenContextGVS) {
+		gvsReq := POTokenRequest{
+			Client:      clientName,
+			Context:     POTokenContextGVS,
+			VideoID:     id,
+			VisitorData: visitor,
+		}
+		gvsRes, gErr := poProvider.GetPOToken(ctx, gvsReq)
+		if gErr != nil {
+			if errors.Is(gErr, context.Canceled) || errors.Is(gErr, context.DeadlineExceeded) {
+				return nil, gErr
+			}
+			if !errors.Is(gErr, ErrPOTokenUnavailable) {
+				return nil, classifyExtractionFailure(clientName, fmt.Errorf("%w: %v", ErrPOTokenProviderFailed, gErr))
+			}
+		} else {
+			if vErr := gvsRes.ValidateFor(gvsReq, time.Now()); vErr != nil {
+				return nil, classifyExtractionFailure(clientName, vErr)
+			}
+			gvsPOToken = gvsRes.Token
+		}
+	}
+
 	// 1. Convert direct unchallenged candidates immediately.
 	for _, cand := range unchallenged {
 		fmtID := strconv.Itoa(cand.raw.Itag)
@@ -136,7 +168,19 @@ func (e *Extractor) ExtractDownloadableResult(
 			NParam:       ChallengeStatus{Detected: false, Resolved: false, Source: ResolutionNotRequired},
 		}
 		formatDiags[key] = d
-		if format, ok := convertResolvedFormat(cand.raw, cand.directURL, profile); ok {
+		targetURL := cand.directURL
+		hasGVSToken := false
+		if gvsPOToken != "" {
+			applied := applyGVSPOToken(targetURL, gvsPOToken)
+			if applied != targetURL {
+				targetURL = applied
+				hasGVSToken = true
+			}
+		}
+		if format, ok := convertResolvedFormat(cand.raw, targetURL, profile); ok {
+			if hasGVSToken {
+				format.Resource.ValidateDestination = validateGVSDestination
+			}
 			media.Formats = append(media.Formats, format)
 		}
 	}
@@ -332,9 +376,21 @@ func (e *Extractor) ExtractDownloadableResult(
 				diag.NParam.Resolved = true
 				diag.NParam.Source = nSource
 			}
+			hasGVSToken := false
+			if gvsPOToken != "" &&
+				parsedURL.Scheme == "https" &&
+				parsedURL.User == nil &&
+				parsedURL.Port() == "" &&
+				isGoogleVideoHost(parsedURL.Hostname()) {
+				q.Set("pot", gvsPOToken)
+				hasGVSToken = true
+			}
 			parsedURL.RawQuery = q.Encode()
 
 			if format, ok := convertResolvedFormat(cand.raw, parsedURL.String(), profile); ok {
+				if hasGVSToken {
+					format.Resource.ValidateDestination = validateGVSDestination
+				}
 				formatDiags[key] = diag
 				media.Formats = append(media.Formats, format)
 			}
@@ -615,4 +671,49 @@ func convertResolvedFormat(
 	}
 
 	return format, true
+}
+
+func isGoogleVideoHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return false
+	}
+	return h == "googlevideo.com" || strings.HasSuffix(h, ".googlevideo.com")
+}
+
+func validateGVSDestination(target *url.URL) error {
+	if target == nil {
+		return errors.New("youtube: nil destination URL")
+	}
+	if target.Scheme != "https" {
+		return fmt.Errorf("youtube: destination scheme %q is not https", target.Scheme)
+	}
+	if target.User != nil {
+		return errors.New("youtube: destination userinfo is not permitted")
+	}
+	if target.Port() != "" {
+		return fmt.Errorf("youtube: destination custom port %q is not permitted", target.Port())
+	}
+	if !isGoogleVideoHost(target.Hostname()) {
+		return fmt.Errorf("youtube: destination host %q is outside Google Video scope", target.Hostname())
+	}
+	return nil
+}
+
+func applyGVSPOToken(rawURL, poToken string) string {
+	if strings.TrimSpace(poToken) == "" {
+		return rawURL
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil ||
+		parsed.Scheme != "https" ||
+		parsed.User != nil ||
+		parsed.Port() != "" ||
+		!isGoogleVideoHost(parsed.Hostname()) {
+		return rawURL
+	}
+	q := parsed.Query()
+	q.Set("pot", poToken)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }

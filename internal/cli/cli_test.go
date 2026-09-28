@@ -2376,10 +2376,11 @@ func TestDownloadCLI_MultiTrackAudioDiagnostics(t *testing.T) {
 
 func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
 	staleLimitation := "No JavaScript challenge solver or PO-token provider is implemented."
+	staleLimitation2 := "No PO-token provider is implemented."
 	expectedStatements := []string{
 		"Inspection reports detected JavaScript challenges without executing solving.",
 		"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
-		"No PO-token provider is implemented.",
+		"PO-token provider interface is available (player, gvs contexts); no built-in token generator is supplied.",
 	}
 
 	mockPlayerResponse := `{
@@ -2444,8 +2445,8 @@ func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
 				t.Fatalf("unexpected inspect error: %v", err)
 			}
 			out := stdout.String()
-			if strings.Contains(out, staleLimitation) {
-				t.Errorf("web text inspect output contains stale limitation: %q", staleLimitation)
+			if strings.Contains(out, staleLimitation) || strings.Contains(out, staleLimitation2) {
+				t.Errorf("web text inspect output contains stale limitation: %q", out)
 			}
 			for _, stmt := range expectedStatements {
 				if !strings.Contains(out, stmt) {
@@ -2464,8 +2465,8 @@ func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
 				t.Fatalf("unexpected inspect error: %v", err)
 			}
 			out := stdout.String()
-			if strings.Contains(out, staleLimitation) {
-				t.Errorf("visionos text inspect output contains stale limitation: %q", staleLimitation)
+			if strings.Contains(out, staleLimitation) || strings.Contains(out, staleLimitation2) {
+				t.Errorf("visionos text inspect output contains stale limitation: %q", out)
 			}
 			for _, stmt := range expectedStatements {
 				if !strings.Contains(out, stmt) {
@@ -2502,7 +2503,7 @@ func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
 			}
 			for _, res := range parsed.Results {
 				for _, lim := range res.Limitations {
-					if lim == staleLimitation {
+					if lim == staleLimitation || lim == staleLimitation2 {
 						t.Errorf("json result for %s contains stale limitation: %q", res.Client, lim)
 					}
 				}

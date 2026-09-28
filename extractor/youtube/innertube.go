@@ -29,6 +29,12 @@ type playerRequest struct {
 			HTML5Preference string `json:"html5Preference"`
 		} `json:"contentPlaybackContext"`
 	} `json:"playbackContext"`
+
+	ServiceIntegrityDimensions *serviceIntegrityDimensions `json:"serviceIntegrityDimensions,omitempty"`
+}
+
+type serviceIntegrityDimensions struct {
+	POToken string `json:"poToken,omitempty"`
 }
 
 func (e *Extractor) InspectVisionOS(
@@ -113,7 +119,7 @@ func (e *Extractor) inspectVisionOS(
 
 	report.Limitations = append(
 		report.Limitations,
-		"Visitor identifier propagated from a fresh watch page; no account cookies or PO-token provider.",
+		"Visitor identifier propagated from a fresh watch page; no account cookies or built-in PO-token generator.",
 	)
 
 	return report, nil
@@ -123,6 +129,16 @@ func (e *Extractor) requestPlayer(
 	ctx context.Context,
 	id string,
 	profile ClientProfile,
+	visitorData ...string,
+) (*playerResponse, error) {
+	return e.requestPlayerWithPOToken(ctx, id, profile, "", visitorData...)
+}
+
+func (e *Extractor) requestPlayerWithPOToken(
+	ctx context.Context,
+	id string,
+	profile ClientProfile,
+	poToken string,
 	visitorData ...string,
 ) (*playerResponse, error) {
 	if err := ctx.Err(); err != nil {
@@ -140,6 +156,11 @@ func (e *Extractor) requestPlayer(
 	}
 
 	payload.Context.Client = profile.Context
+	if poToken != "" {
+		payload.ServiceIntegrityDimensions = &serviceIntegrityDimensions{
+			POToken: poToken,
+		}
+	}
 
 	payload.PlaybackContext.ContentPlaybackContext.HTML5Preference =
 		"HTML5_PREF_WANTS"

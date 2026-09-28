@@ -152,7 +152,7 @@ func webProfile() ClientProfile {
 			HLSExtraction:      true,
 			SignatureDecipher:  false,
 			NChallengeSolve:    false,
-			POTokenProvider:    false,
+			POTokenProvider:    true,
 		},
 	}
 }

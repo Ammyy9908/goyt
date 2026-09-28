@@ -2,6 +2,7 @@ package goyt
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -52,7 +53,8 @@ type Format struct {
 // Headers apply to this resource only. Future downloaders must
 // avoid forwarding credentials across unrelated redirects.
 type Resource struct {
-	URL       string
-	Headers   http.Header `json:"-"`
-	ExpiresAt *time.Time
+	URL                 string
+	Headers             http.Header                 `json:"-"`
+	ExpiresAt           *time.Time                  `json:"-"`
+	ValidateDestination func(target *url.URL) error `json:"-"`
 }
