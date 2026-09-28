@@ -2373,3 +2373,152 @@ func TestDownloadCLI_MultiTrackAudioDiagnostics(t *testing.T) {
 		}
 	})
 }
+
+func TestInspect_LimitationsOutput_WebAndVisionOS(t *testing.T) {
+	staleLimitation := "No JavaScript challenge solver or PO-token provider is implemented."
+	expectedStatements := []string{
+		"Inspection reports detected JavaScript challenges without executing solving.",
+		"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
+		"No PO-token provider is implemented.",
+	}
+
+	mockPlayerResponse := `{
+		"videoDetails": {
+			"videoId": "dQw4w9WgXcQ",
+			"title": "Rick Astley - Never Gonna Give You Up",
+			"lengthSeconds": "212"
+		},
+		"playabilityStatus": {
+			"status": "OK"
+		},
+		"streamingData": {
+			"formats": [
+				{
+					"itag": 18,
+					"mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+					"width": 640,
+					"height": 360,
+					"url": "https://media.test/video.mp4"
+				}
+			]
+		}
+	}`
+
+	mockWatchHTML := fmt.Sprintf(`<!DOCTYPE html><html><head>
+		<script>var ytInitialPlayerResponse = %s;</script>
+		<script>ytcfg.set({"VISITOR_DATA":"test-visitor-token"});</script>
+	</head><body></body></html>`, mockPlayerResponse)
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/watch") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(mockWatchHTML)),
+				Request:    req,
+			}, nil
+		}
+		if req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/youtubei/v1/player") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(mockPlayerResponse)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	testURL := "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+	// 1. Text table inspection for web client
+	t.Run("web_text", func(t *testing.T) {
+		withMockTransport(t, transport, func() {
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), []string{"inspect", "-url", testURL, "-client", "web"}, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("unexpected inspect error: %v", err)
+			}
+			out := stdout.String()
+			if strings.Contains(out, staleLimitation) {
+				t.Errorf("web text inspect output contains stale limitation: %q", staleLimitation)
+			}
+			for _, stmt := range expectedStatements {
+				if !strings.Contains(out, stmt) {
+					t.Errorf("web text inspect output missing expected statement: %q", stmt)
+				}
+			}
+		})
+	})
+
+	// 2. Text table inspection for visionos client
+	t.Run("visionos_text", func(t *testing.T) {
+		withMockTransport(t, transport, func() {
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), []string{"inspect", "-url", testURL, "-client", "visionos"}, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("unexpected inspect error: %v", err)
+			}
+			out := stdout.String()
+			if strings.Contains(out, staleLimitation) {
+				t.Errorf("visionos text inspect output contains stale limitation: %q", staleLimitation)
+			}
+			for _, stmt := range expectedStatements {
+				if !strings.Contains(out, stmt) {
+					t.Errorf("visionos text inspect output missing expected statement: %q", stmt)
+				}
+			}
+		})
+	})
+
+	// 3. JSON inspection for all clients
+	t.Run("all_json", func(t *testing.T) {
+		withMockTransport(t, transport, func() {
+			var stdout, stderr bytes.Buffer
+			err := Run(context.Background(), []string{"inspect", "-url", testURL, "-client", "all", "-json"}, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("unexpected inspect json error: %v", err)
+			}
+			var parsed struct {
+				SchemaVersion int `json:"schema_version"`
+				Results       []struct {
+					Client      string   `json:"client"`
+					Status      string   `json:"status"`
+					Limitations []string `json:"limitations"`
+				} `json:"results"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &parsed); err != nil {
+				t.Fatalf("failed to parse inspect JSON output: %v\nOutput was:\n%s", err, stdout.String())
+			}
+			if parsed.SchemaVersion != 1 {
+				t.Fatalf("expected schema_version 1, got %d", parsed.SchemaVersion)
+			}
+			if len(parsed.Results) != 2 {
+				t.Fatalf("expected 2 results (visionos and web), got %d", len(parsed.Results))
+			}
+			for _, res := range parsed.Results {
+				for _, lim := range res.Limitations {
+					if lim == staleLimitation {
+						t.Errorf("json result for %s contains stale limitation: %q", res.Client, lim)
+					}
+				}
+				for _, stmt := range expectedStatements {
+					found := false
+					for _, lim := range res.Limitations {
+						if lim == stmt {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("json result for %s missing expected statement: %q", res.Client, stmt)
+					}
+				}
+			}
+		})
+	})
+}

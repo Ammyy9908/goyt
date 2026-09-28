@@ -486,7 +486,9 @@ func buildReport(id string, player *playerResponse) *Report {
 		HasSABREndpoint: player.StreamingData.ServerABRStreamingURL != "",
 		Limitations: []string{
 			"Page-response inspection only; format inventory may be incomplete.",
-			"No JavaScript challenge solver or PO-token provider is implemented.",
+			"Inspection reports detected JavaScript challenges without executing solving.",
+			"Downloads can optionally solve supported JavaScript challenges using -js-runtime.",
+			"No PO-token provider is implemented.",
 			"Discovered URLs have not been verified for playback or downloading.",
 		},
 	}

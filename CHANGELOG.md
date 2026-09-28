@@ -51,6 +51,7 @@
 ### Fixed
 
 - Handled Oracle Ubuntu and cloud host bot-check responses descriptively, explaining that the selected client received a bot-check challenge without claiming to bypass or fix that response, promising automatic fallback, or advising infinite retries.
+- Corrected stale inspection limitations in text reports and Schema 1 JSON outputs, replacing the blanket no-solver statement with accurate, separate declarations that inspection reports detected challenges without solving, downloads can optionally solve supported challenges using `-js-runtime`, and no PO-token provider is implemented.
 
 ## [0.1.0-rc.7] - 2026-09-27
 
