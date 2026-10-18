@@ -53,6 +53,11 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		"",
 		"Proof-of-Origin token provider HTTP endpoint URL, e.g. http://127.0.0.1:4416",
 	)
+	diagnosticsFlag := flags.Bool(
+		"diagnostics",
+		false,
+		"print sanitized extraction diagnostics report",
+	)
 	timeout := flags.Duration("timeout", 30*time.Minute, "overall job timeout (0 disables)")
 	stallTimeout := flags.Duration("stall-timeout", 60*time.Second, "network inactivity timeout per media request (0 disables)")
 	urlRefreshes := flags.Int("url-refreshes", 1, "maximum URL re-extractions on expired or forbidden media (0 disables)")
@@ -62,7 +67,7 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt download -url URL [options]
-  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check]
+  goyt download -url URL [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-transport http|hls] [-video-codec h264|vp9|av1] [-container mp4|webm|mkv] [-height 1080] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out video.<ext>] [-decode-check] [-diagnostics]
   goyt download -url URL -audio-only [-client visionos|web] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-audio-format best|aac|alac|flac|m4a|mp3|opus|vorbis|wav] [-audio-quality 0-9] [-audio-bitrate BITRATE] [-transport http|hls] [-audio-language LANG] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1] [-job-dir DIR] [-out audio.<ext>] [-decode-check]
   goyt download -resume-job DIR [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-po-token-provider none|http|bgutil-http] [-po-token-endpoint URL] [-timeout 30m] [-stall-timeout 60s] [-url-refreshes 1]
   goyt download -help`)
@@ -487,8 +492,14 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
 				extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if err != nil {
+					if *diagnosticsFlag {
+						printExtractionDiagnostics(stderr, extractor, err)
+					}
 					_ = os.RemoveAll(absJobDir)
 					return err
+				}
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, nil)
 				}
 
 				fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
@@ -547,8 +558,14 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintln(stdout, "Extracting YouTube HLS manifest...")
 				extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 				if err != nil {
+					if *diagnosticsFlag {
+						printExtractionDiagnostics(stderr, extractor, err)
+					}
 					_ = os.RemoveAll(absJobDir)
 					return err
+				}
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, nil)
 				}
 
 				fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
@@ -593,8 +610,14 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 				res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 				if err != nil {
+					if *diagnosticsFlag {
+						printExtractionDiagnostics(stderr, extractor, err)
+					}
 					_ = os.RemoveAll(absJobDir)
 					return err
+				}
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, nil)
 				}
 
 				initialMedia = res.Media
@@ -639,8 +662,14 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 				fmt.Fprintln(stdout, "Extracting direct YouTube formats...")
 				res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 				if err != nil {
+					if *diagnosticsFlag {
+						printExtractionDiagnostics(stderr, extractor, err)
+					}
 					_ = os.RemoveAll(absJobDir)
 					return err
+				}
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, nil)
 				}
 
 				initialMedia = res.Media
@@ -769,7 +798,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 			res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 			if err != nil {
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, err)
+				}
 				return err
+			}
+			if *diagnosticsFlag {
+				printExtractionDiagnostics(stderr, extractor, nil)
 			}
 			media := res.Media
 
@@ -946,7 +981,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 			extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 			if err != nil {
+				if *diagnosticsFlag {
+					printExtractionDiagnostics(stderr, extractor, err)
+				}
 				return err
+			}
+			if *diagnosticsFlag {
+				printExtractionDiagnostics(stderr, extractor, nil)
 			}
 
 			fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
@@ -1208,7 +1249,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 		res, err := extractor.ExtractDownloadableResult(ctx, u, selectedClient)
 		if err != nil {
+			if *diagnosticsFlag {
+				printExtractionDiagnostics(stderr, extractor, err)
+			}
 			return err
+		}
+		if *diagnosticsFlag {
+			printExtractionDiagnostics(stderr, extractor, nil)
 		}
 		media := res.Media
 
@@ -1391,7 +1438,13 @@ func runDownload(ctx context.Context, args []string, stdout, stderr io.Writer) e
 
 		extracted, err := extractor.ExtractHLSWithClient(ctx, u, selectedClient)
 		if err != nil {
+			if *diagnosticsFlag {
+				printExtractionDiagnostics(stderr, extractor, err)
+			}
 			return err
+		}
+		if *diagnosticsFlag {
+			printExtractionDiagnostics(stderr, extractor, nil)
 		}
 
 		fmt.Fprintln(stdout, "Title:", extracted.Media.Title)
@@ -1617,6 +1670,22 @@ func printResultFormatDiagnostics(stderr io.Writer, res *youtube.DownloadableRes
 	}
 	diag, _ := res.FormatDiagnostics(formatID, audioTrackID...)
 	fmt.Fprintln(stderr, diag.String())
+}
+
+func printExtractionDiagnostics(w io.Writer, extractor *youtube.Extractor, err error) {
+	if w == nil {
+		return
+	}
+	var diag *youtube.ExtractionDiagnostics
+	var extErr *youtube.ExtractionError
+	if err != nil && errors.As(err, &extErr) && extErr.Diagnostics != nil {
+		diag = extErr.Diagnostics
+	} else if extractor != nil {
+		diag = extractor.LatestDiagnostics()
+	}
+	if diag != nil {
+		fmt.Fprintln(w, diag.FormatTextReport())
+	}
 }
 
 func printSelectedFormatDiagnostics(stderr io.Writer, extractor *youtube.Extractor, formatIDs ...string) {

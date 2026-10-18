@@ -65,6 +65,7 @@ type Extractor struct {
 	solver      ChallengeSolver
 	poProvider  POTokenProvider
 	diagnostics map[string]FormatDiagnostics
+	latestDiag  *ExtractionDiagnostics
 }
 
 var _ goyt.Extractor = (*Extractor)(nil)
@@ -166,6 +167,28 @@ func (e *Extractor) setDiagnostics(diags map[string]FormatDiagnostics) {
 	e.diagnostics = diags
 }
 
+// LatestDiagnostics returns a copy of the latest extraction diagnostics, or nil if none.
+func (e *Extractor) LatestDiagnostics() *ExtractionDiagnostics {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.latestDiag == nil {
+		return nil
+	}
+	res := *e.latestDiag
+	return &res
+}
+
+func (e *Extractor) setLatestDiagnostics(diag *ExtractionDiagnostics) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if diag == nil {
+		e.latestDiag = nil
+		return
+	}
+	copyDiag := *diag
+	e.latestDiag = &copyDiag
+}
+
 func (e *Extractor) Name() string {
 	return "youtube"
 }
@@ -225,16 +248,17 @@ type DiscoveredHLSRendition struct {
 }
 
 type Report struct {
-	Media           *goyt.Media
-	PlaybackStatus  string
-	PlaybackReason  string
-	Formats         []DiscoveredFormat
-	AudioTracks     []DiscoveredAudioTrack
-	HLSRenditions   []DiscoveredHLSRendition
-	HasHLSManifest  bool
-	HasDASHManifest bool
-	Limitations     []string
-	HasSABREndpoint bool
+	Media            *goyt.Media
+	PlaybackStatus   string
+	PlaybackReason   string
+	Formats          []DiscoveredFormat
+	AudioTracks      []DiscoveredAudioTrack
+	HLSRenditions    []DiscoveredHLSRendition
+	HasHLSManifest   bool
+	HasDASHManifest  bool
+	Limitations      []string
+	HasSABREndpoint  bool
+	ExtractionReport *ExtractionDiagnostics
 }
 
 type playerResponse struct {
@@ -372,12 +396,34 @@ func (e *Extractor) inspectWeb(
 		return nil, err
 	}
 
-	player, err := e.fetchWatchPagePlayer(ctx, id)
+	builder := newDiagBuilder(ClientWeb, id)
+	t0 := time.Now()
+	player, watchHTML, err := e.fetchWatchPagePlayerAndHTML(ctx, id)
+	fetchDur := time.Since(t0)
 	if err != nil {
-		return nil, err
+		builder.recordStage(StageWatchPageFetch, fetchDur, 0, false, err)
+		extErr := classifyExtractionFailure(ClientWeb, err)
+		diag := builder.finishFailure(StageWatchPageFetch, err, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
+	}
+	builder.recordStage(StageWatchPageFetch, fetchDur, http.StatusOK, true, nil)
+
+	if len(watchHTML) > 0 {
+		t1 := time.Now()
+		visitor, _ := parseVisitorData(watchHTML)
+		builder.diagnostics.SessionInputs.VisitorDataPresent = (visitor != "")
+		builder.recordStage(StageVisitorDataParse, time.Since(t1), 0, true, nil)
 	}
 
-	return buildReport(id, player), nil
+	report := buildReport(id, player)
+	allRaw := append([]playerFormat{}, player.StreamingData.Formats...)
+	allRaw = append(allRaw, player.StreamingData.AdaptiveFormats...)
+	diag := builder.finishSuccess(player, allRaw, 0)
+	report.ExtractionReport = diag
+	e.setLatestDiagnostics(diag)
+	return report, nil
 }
 
 func (e *Extractor) fetchWatchPagePlayer(

@@ -87,6 +87,9 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 # Download video with external PO-token provider (e.g. local bgutil-ytdlp-pot-provider service) and JS runtime for signature/n challenges
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -client web -js-runtime deno -po-token-provider http -po-token-endpoint "http://127.0.0.1:4416" -decode-check
 
+# Download with sanitized stage-by-stage extraction diagnostics printed to stderr
+./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -diagnostics
+
 # Download with custom overall job timeout and network inactivity stall protection
 ./bin/goyt download -url "https://www.youtube.com/watch?v=VIDEO_ID" -transport hls -timeout 2h -stall-timeout 45s
 
@@ -144,6 +147,7 @@ Downloads a YouTube video using either direct HTTP streams or HLS transport in v
 - `-out`: Destination file path. In video mode, extension must match the container (`.mp4`, `.webm`, `.mkv`, default `video.<container>`). In audio-only mode, extension must match the resolved format (default `audio.<ext>`).
 - `-js-runtime`: JavaScript runtime for solving player cipher/n challenges: `none`, `node`, `deno`, `bun`, `qjs`, `auto`, or custom binary path (default `none`). When configured, challenge-resolution diagnostics for selected formats are printed to `stderr` (e.g. `Format 18: signature=not_required, n=not_required` or `Format 18: signature=resolved(runtime), n=resolved(cache)`).
 - `-decode-check`: Optionally decodes the complete output after verification to check for stream errors.
+- `-diagnostics`: Emit a sanitized, stage-by-stage extraction diagnostics report to `stderr` upon completion or error (zero secrets/tokens exposed).
 - `-version`: Print `goyt` version.
 
 **Legacy Shorthand:**
@@ -163,6 +167,9 @@ Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signatu
 # Inspect specific client profile (web or visionos):
 ./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client visionos
 
+# Inspect client profile with sanitized extraction diagnostics:
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=VIDEO_ID" -client visionos -diagnostics
+
 # Inspect in machine-readable JSON format (visionos client):
 ./bin/goyt inspect -url "https://youtu.be/VIDEO_ID" -client visionos -json > info.json
 
@@ -177,6 +184,7 @@ Inspects available YouTube formats, streaming endpoints (HLS/DASH/SABR), signatu
 - `-url`: Public YouTube video or YouTube Music track URL (required).
 - `-client`: Client response to inspect: `web`, `visionos`, or `all` (default `all`).
 - `-js-runtime`: JavaScript runtime for solving player cipher/n challenges: `none`, `node`, `deno`, `bun`, `qjs`, `auto`, or custom binary path (default `none`).
+- `-diagnostics`: Print sanitized extraction diagnostics report to `stdout` alongside inspection results.
 - `-json`: Emit stable, machine-readable JSON output to stdout.
 
 #### Machine-Readable JSON Output (`-json`)
@@ -687,12 +695,112 @@ curl -s http://127.0.0.1:4416/ping
   - [`yt_dlp/extractor/youtube.py`](https://github.com/yt-dlp/yt-dlp/blob/c843bc40e70b77b7fce1c27242d5ba2ae147d3d7/yt_dlp/extractor/youtube.py#L4077): Root-level `serviceIntegrityDimensions` placement in `v1/player` request payload.
 - **yt-dlp PO-Token Guide**: [yt-dlp PO Token Guide Wiki](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide).
 
+## Environment-Dependent Extraction Diagnostics & Comparison Guide
+
+YouTube extraction behavior varies significantly across network environments, hosting platforms, and client profiles. For example, cloud hosting instances (such as Oracle Cloud ARM instances) frequently encounter bot-check challenges or altered watch-page HTML responses that do not appear in residential or office environments (such as macOS developer machines). These differences reflect complex bot-detection heuristics, client identity constraints, and session integrity requirements rather than a single factor like IP reputation alone.
+
+`goyt` provides structured, opt-in extraction diagnostics (`-diagnostics`) to trace and isolate extraction stages deterministically without speculative guessing.
+
+### Extraction Lifecycle Stages
+
+When `-diagnostics` is enabled on `download` or `inspect`, `goyt` records each lifecycle stage with timing, HTTP status, and sanitized session inputs:
+
+1. **`watch_page_fetch`**: HTTP GET to `https://www.youtube.com/watch?v=...` (captures status code and response size).
+2. **`visitor_data_parse`**: Extraction of `visitor_data` session token and `ytInitialPlayerResponse` / player configuration from HTML.
+3. **`player_request`**: Innertube API request (`/youtubei/v1/player`) using the selected client profile (`visionos` or `web`).
+4. **`po_token_acquire`**: External PO-token acquisition from configured provider service (if applicable).
+5. **`challenge_solve`**: JavaScript cipher signature deciphering and N-parameter challenge transformation via `-js-runtime`.
+6. **`format_filtering`**: Parsing and filtering direct HTTP/HLS format streams, recording available, playable, and rejected format counts (e.g. SABR, DRM, cipher, or missing audio).
+
+### Strict Redaction Guarantee
+
+Diagnostic reports strictly enforce privacy and secret sanitization:
+- **Zero Secrets**: No PO-tokens, bearer tokens, visitor IDs, cookies, authorization headers, or signed URLs (`signature`, `sig`, `s`, `n`, `expire`, `ip`) are printed or exported.
+- **Sanitized Session Inputs**: Header names and presence are logged, but raw token strings and credentials are redacted.
+
+### Controlled Mac vs. Oracle VM Test Matrix
+
+To diagnose environment-dependent extraction differences between a local Mac and an Oracle Cloud Linux ARM64 instance, execute the following standardized commands across three benchmark videos:
+
+#### Benchmark Videos
+
+| Key | Video Name | URL | Characteristics |
+|---|---|---|---|
+| **V1** | Rick Astley | `https://www.youtube.com/watch?v=dQw4w9WgXcQ` | High traffic, standard formats |
+| **V2** | Big Buck Bunny | `https://www.youtube.com/watch?v=aqz-KE-bpKQ` | Creative Commons, standard streams |
+| **V3** | Sintel | `https://www.youtube.com/watch?v=eRsGyueVLvQ` | Creative Commons, multi-audio/cipher streams |
+
+#### Diagnostic Inspection Commands
+
+Run these commands on both Mac and Oracle VM:
+
+```sh
+# Test V1 (Rick Astley) with visionos client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -client visionos -diagnostics
+
+# Test V1 (Rick Astley) with web client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -client web -diagnostics
+
+# Test V2 (Big Buck Bunny) with visionos client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=aqz-KE-bpKQ" -client visionos -diagnostics
+
+# Test V2 (Big Buck Bunny) with web client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=aqz-KE-bpKQ" -client web -diagnostics
+
+# Test V3 (Sintel) with visionos client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=eRsGyueVLvQ" -client visionos -diagnostics
+
+# Test V3 (Sintel) with web client
+./bin/goyt inspect -url "https://www.youtube.com/watch?v=eRsGyueVLvQ" -client web -diagnostics
+```
+
+#### Optional yt-dlp Baseline Reference
+
+To establish an external baseline without caching or saved credentials:
+
+```sh
+yt-dlp -F --verbose --no-cache-dir "https://www.youtube.com/watch?v=eRsGyueVLvQ"
+```
+
+### Evidence Sources: Live Traces vs. Code Inspection & Fixtures
+
+The diagnostic architecture and comparison guide are grounded in three distinct evidence categories:
+
+1. **Observed Live Behavior (Oracle Cloud ARM64 vs. macOS Developer Machines)**:
+   - **Rick Astley (`dQw4w9WgXcQ`)**: Live download verified on Oracle Linux ARM64 using `web` at 360p and `visionos` at 1080p, including stream merge, metadata verification, and full decode check.
+   - **Big Buck Bunny (`aqz-KE-bpKQ`)**: Live extraction on Oracle Linux ARM64 with `visionos` client failed with `bot_check_required` (`LOGIN_REQUIRED` playability status accompanied by explicit `"Sign in to confirm you’re not a bot"` message).
+   - **Sintel (`eRsGyueVLvQ`)**:
+     - **macOS (`goyt visionos`)**: Live download, stream merge, verification, and full decode check passed.
+     - **Oracle Cloud ARM64 (`goyt visionos`)**: Extraction failed with `bot_check_required` (`LOGIN_REQUIRED` playability status with explicit `"Sign in to confirm you’re not a bot"` reason).
+     - **Oracle Cloud ARM64 (`yt-dlp` stable 2026.08.19 `visionos`)**: Encountered the exact same explicit bot check (`LOGIN_REQUIRED` / `"Sign in to confirm you’re not a bot"`), verified via simulation only (`-s`), with plugins disabled and no PO-token provider configured.
+     - *(Note: Earlier claims that Oracle Sintel `web` returned missing player JSON were unsupported and have been removed; both goyt and yt-dlp encounter explicit bot-check challenges across client profiles on cloud hosts without an IP-only cause.)*
+2. **Code Inspection**:
+   - Trace analysis confirmed that for `web` client downloads, PO-token acquisition occurs strictly during format processing *after* the watch page and player response are retrieved. If watch-page retrieval or player API requests fail, the PO-token provider is never reached.
+3. **Offline Fixtures & Contract Tests**:
+   - Simulated responses in `diagnostics_test.go` and `potprovider` verify edge cases (e.g. SABR format rejection, missing player JSON, consent wall detection, cipher challenge parsing, and token expiry handling) without reliance on live network connectivity.
+
+### Distinguishing Error Categories
+
+The diagnostics report categorizes extraction obstacles precisely:
+
+- **Missing Player JSON (`invalid_player_response`)**: The watch page HTML was fetched successfully (HTTP 200), but does not contain embedded `ytInitialPlayerResponse` or player configuration JSON.
+- **Missing Visitor Metadata**: The watch page HTML was fetched successfully (HTTP 200), but does not contain embedded `ytcfg` or visitor data (`VISITOR_DATA` / `X-Goog-Visitor-Id`).
+- **Positively Identified Consent Responses**: When YouTube redirects to `consent.youtube.com` or serves an EU consent wall page, the diagnostic trace captures the redirect status and distinct page title, distinguishing consent gates from generic missing metadata.
+- **Explicit Bot-Check Response (`bot_check_required`)**: YouTube's Innertube player API returns `playabilityStatus.status == "LOGIN_REQUIRED"` with reason `"Sign in to confirm you’re not a bot"` (or automated query notice). Both `goyt` and `yt-dlp` encounter this on certain client profiles (such as `visionos`) on cloud hosts. This indicates bot-detection heuristics or session integrity enforcement rather than an IP-only block.
+- **Playback Restriction (`playback_restricted`)**: YouTube returns `LOGIN_REQUIRED` without the bot-check marker (e.g., age gate, members-only, geo-block) or `UNPLAYABLE`.
+- **PO-Token Provider Failure (`po_token_provider_failed`)**: The external PO-token provider daemon returned an error, timed out, or served an invalid token payload.
+
+### Strict Redaction & Data Protection Guarantee
+
+- **Allowlisted Metadata Only**: Diagnostic models store strictly allowlisted scalar metrics (`duration_ms`, `http_status`, format counts, presence booleans, and sanitized error messages). Raw request payloads, signed URLs, cookies, visitor tokens, and authorization headers are never recorded in diagnostic structures.
+- **Regex Sanitization as Defense-in-Depth**: All error messages and playback reasons pass through `sanitizeErrorMessage` regex scrubbers to ensure that unexpected token or URL parameters in upstream error text are stripped before display.
+
 ## Limitations
 
 - JavaScript challenge solving requires a supported host JS runtime (`node`, `deno`, `bun`, `qjs`) enabled via `-js-runtime`. A pluggable PO-token provider interface and HTTP adapter exist for external service integration (`-po-token-provider`), but no built-in PO-token generator, cookie/account import, or SABR downloading is included.
 - No DASH or SABR downloading.
-- No automatic client fallback or bypass: When YouTube returns a bot-check challenge (e.g. `LOGIN_REQUIRED` with "Sign in to confirm you’re not a bot", commonly observed on Oracle Cloud and datacenter IP ranges), `goyt` diagnoses the condition descriptively (`bot_check_required`) without claiming to bypass it, attempting challenge solving, or automatically falling back to another client.
-- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and IP reputation. Successful inspection or metadata extraction does not guarantee media availability. Structured validation of solver outputs cannot guarantee that YouTube will accept the deciphered media request. Resolved URLs are only verified for download when a real media request succeeds.
+- No automatic client fallback or bypass: When YouTube returns a bot-check challenge (e.g. `LOGIN_REQUIRED` with "Sign in to confirm you’re not a bot", observed with clients like visionos on various network and hosting environments), `goyt` diagnoses the condition descriptively (`bot_check_required`) without claiming to bypass it, attempting challenge solving, or automatically falling back to another client.
+- No guarantee of universal YouTube compatibility: YouTube playback responses vary across client identities, network environments, and session integrity. Successful inspection or metadata extraction does not guarantee media availability. Structured validation of solver outputs cannot guarantee that YouTube will accept the deciphered media request. Resolved URLs are only verified for download when a real media request succeeds.
 - Audio-only downloads require a standalone audio stream (direct HTTP) or separate audio rendition (HLS). Muxed-only video/audio streams cannot be converted in audio-only mode and return an explicit unsupported error.
 - Direct HLS media playlists must be confirmed audio-only to be downloaded in audio-only mode.
 - MP3 audio conversion is lossy; AAC/Opus sources are re-encoded via `libmp3lame`.

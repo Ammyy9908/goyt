@@ -61,46 +61,92 @@ func (e *Extractor) ExtractDownloadableResult(
 	solver := e.Solver()
 	poProvider := e.POTokenProvider()
 
+	builder := newDiagBuilder(clientName, id)
+	builder.diagnostics.SessionInputs.POTokenProviderConfigured = (poProvider != nil)
+	builder.diagnostics.SessionInputs.ChallengeSolverConfigured = (solver != nil)
+
 	var watchHTML []byte
 	var player *playerResponse
 	var visitor string
+	var playerReqDur time.Duration
 
 	if clientName == ClientWeb {
+		t0 := time.Now()
 		player, watchHTML, err = e.fetchWatchPagePlayerAndHTML(ctx, id)
+		fetchDur := time.Since(t0)
 		if err != nil {
-			return nil, classifyExtractionFailure(clientName, err)
+			builder.recordStage(StageWatchPageFetch, fetchDur, 0, false, err)
+			extErr := classifyExtractionFailure(clientName, err)
+			diag := builder.finishFailure(StageWatchPageFetch, err, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
+		builder.recordStage(StageWatchPageFetch, fetchDur, http.StatusOK, true, nil)
+
 		if len(watchHTML) > 0 {
+			t1 := time.Now()
 			visitor, _ = parseVisitorData(watchHTML)
+			builder.diagnostics.SessionInputs.VisitorDataPresent = (visitor != "")
+			builder.recordStage(StageVisitorDataParse, time.Since(t1), 0, true, nil)
 		}
 	} else {
+		t0 := time.Now()
 		var vErr error
 		visitor, vErr = e.fetchVisitorData(ctx, id)
+		vDur := time.Since(t0)
 		if vErr != nil {
-			return nil, classifyExtractionFailure(clientName, vErr)
+			builder.recordStage(StageWatchPageFetch, vDur, 0, false, vErr)
+			extErr := classifyExtractionFailure(clientName, vErr)
+			diag := builder.finishFailure(StageWatchPageFetch, vErr, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
+		builder.diagnostics.SessionInputs.VisitorDataPresent = (visitor != "")
+		builder.recordStage(StageWatchPageFetch, vDur, http.StatusOK, true, nil)
 
+		t1 := time.Now()
 		player, err = e.requestPlayer(ctx, id, profile, visitor)
+		playerReqDur = time.Since(t1)
 		if err != nil {
-			return nil, classifyExtractionFailure(clientName, err)
+			builder.recordStage(StagePlayerRequest, playerReqDur, 0, false, err)
+			extErr := classifyExtractionFailure(clientName, err)
+			diag := builder.finishFailure(StagePlayerRequest, err, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
 	}
 
 	if player.PlayabilityStatus.Status != "OK" {
-		return nil, classifyPlayabilityError(
+		extErr := classifyPlayabilityError(
 			clientName,
 			player.PlayabilityStatus.Status,
 			player.PlayabilityStatus.Reason,
 		)
+		builder.recordStage(StagePlayerRequest, playerReqDur, http.StatusOK, false, extErr)
+		diag := builder.finishFailure(StagePlayerRequest, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
+	}
+
+	if clientName != ClientWeb {
+		builder.recordStage(StagePlayerRequest, playerReqDur, http.StatusOK, true, nil)
 	}
 
 	if player.VideoDetails.IsLiveContent {
-		return nil, &ExtractionError{
+		extErr := &ExtractionError{
 			Code:           ErrCodeNoSupportedFormats,
 			Client:         clientName,
 			PlaybackStatus: player.PlayabilityStatus.Status,
 			Message:        "youtube: this prototype does not support live-related videos",
 		}
+		diag := builder.finishFailure(StageFormatDiscovery, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
 
 	report := buildReport(id, player)
@@ -135,6 +181,8 @@ func (e *Extractor) ExtractDownloadableResult(
 	// Fetch GVS PO-token once for this extraction scope if supported and configured.
 	var gvsPOToken string
 	if poProvider != nil && ClientSupportsPOTokenContext(clientName, POTokenContextGVS) {
+		builder.diagnostics.SessionInputs.POTokenContext = string(POTokenContextGVS)
+		tPo := time.Now()
 		gvsReq := POTokenRequest{
 			Client:      clientName,
 			Context:     POTokenContextGVS,
@@ -142,18 +190,35 @@ func (e *Extractor) ExtractDownloadableResult(
 			VisitorData: visitor,
 		}
 		gvsRes, gErr := poProvider.GetPOToken(ctx, gvsReq)
+		poDur := time.Since(tPo)
 		if gErr != nil {
+			builder.recordStage(StagePOTokenAcquire, poDur, 0, false, gErr)
 			if errors.Is(gErr, context.Canceled) || errors.Is(gErr, context.DeadlineExceeded) {
 				return nil, gErr
 			}
 			if !errors.Is(gErr, ErrPOTokenUnavailable) {
-				return nil, classifyExtractionFailure(clientName, fmt.Errorf("%w: %v", ErrPOTokenProviderFailed, gErr))
+				extErr := classifyExtractionFailure(clientName, fmt.Errorf("%w: %v", ErrPOTokenProviderFailed, gErr))
+				diag := builder.finishFailure(StagePOTokenAcquire, gErr, extErr)
+				extErr.Diagnostics = diag
+				e.setLatestDiagnostics(diag)
+				return nil, extErr
 			}
 		} else {
 			if vErr := gvsRes.ValidateFor(gvsReq, time.Now()); vErr != nil {
-				return nil, classifyExtractionFailure(clientName, vErr)
+				builder.recordStage(StagePOTokenAcquire, poDur, 0, false, vErr)
+				extErr := classifyExtractionFailure(clientName, vErr)
+				diag := builder.finishFailure(StagePOTokenAcquire, vErr, extErr)
+				extErr.Diagnostics = diag
+				e.setLatestDiagnostics(diag)
+				return nil, extErr
 			}
 			gvsPOToken = gvsRes.Token
+			builder.diagnostics.SessionInputs.POTokenAcquired = true
+			if gvsRes.ExpiresAt != nil && !gvsRes.ExpiresAt.IsZero() {
+				sec := int64(time.Until(*gvsRes.ExpiresAt).Seconds())
+				builder.diagnostics.SessionInputs.POTokenExpiresInSeconds = &sec
+			}
+			builder.recordStage(StagePOTokenAcquire, poDur, 0, true, nil)
 		}
 	}
 
@@ -215,14 +280,21 @@ func (e *Extractor) ExtractDownloadableResult(
 
 	// 2. If challenged formats exist and a solver is configured, solve challenges.
 	if len(challenged) > 0 && solver != nil {
+		tSolve := time.Now()
 		if len(watchHTML) == 0 {
 			watchHTML, err = e.fetchWatchPageHTML(ctx, id)
 			if err != nil {
 				e.setDiagnostics(formatDiags)
 				if len(media.Formats) == 0 {
-					return nil, classifyExtractionFailure(clientName, err)
+					extErr := classifyExtractionFailure(clientName, err)
+					diag := builder.finishFailure(StageChallengeSolve, err, extErr)
+					extErr.Diagnostics = diag
+					e.setLatestDiagnostics(diag)
+					return nil, extErr
 				}
-				return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
+				diag := builder.finishSuccess(player, rawFormats, len(media.Formats))
+				e.setLatestDiagnostics(diag)
+				return &DownloadableResult{Media: media, Diagnostics: formatDiags, ExtractionReport: diag}, nil
 			}
 		}
 
@@ -230,18 +302,30 @@ func (e *Extractor) ExtractDownloadableResult(
 		if sErr != nil {
 			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
-				return nil, classifyExtractionFailure(clientName, sErr)
+				extErr := classifyExtractionFailure(clientName, sErr)
+				diag := builder.finishFailure(StageChallengeSolve, sErr, extErr)
+				extErr.Diagnostics = diag
+				e.setLatestDiagnostics(diag)
+				return nil, extErr
 			}
-			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
+			diag := builder.finishSuccess(player, rawFormats, len(media.Formats))
+			e.setLatestDiagnostics(diag)
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags, ExtractionReport: diag}, nil
 		}
 
 		script, fErr := e.fetchPlayerScript(ctx, scriptURL)
 		if fErr != nil {
 			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
-				return nil, classifyExtractionFailure(clientName, fErr)
+				extErr := classifyExtractionFailure(clientName, fErr)
+				diag := builder.finishFailure(StageChallengeSolve, fErr, extErr)
+				extErr.Diagnostics = diag
+				e.setLatestDiagnostics(diag)
+				return nil, extErr
 			}
-			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
+			diag := builder.finishSuccess(player, rawFormats, len(media.Formats))
+			e.setLatestDiagnostics(diag)
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags, ExtractionReport: diag}, nil
 		}
 
 		// Build deduplicated batch.
@@ -281,13 +365,22 @@ func (e *Extractor) ExtractDownloadableResult(
 		}
 
 		solverResult, solveErr := solver.SolveChallenges(ctx, script, batch)
+		solveDur := time.Since(tSolve)
 		if solveErr != nil {
+			builder.recordStage(StageChallengeSolve, solveDur, 0, false, solveErr)
 			e.setDiagnostics(formatDiags)
 			if len(media.Formats) == 0 {
-				return nil, classifyExtractionFailure(clientName, fmt.Errorf("challenge solver: %w", solveErr))
+				extErr := classifyExtractionFailure(clientName, fmt.Errorf("challenge solver: %w", solveErr))
+				diag := builder.finishFailure(StageChallengeSolve, solveErr, extErr)
+				extErr.Diagnostics = diag
+				e.setLatestDiagnostics(diag)
+				return nil, extErr
 			}
-			return &DownloadableResult{Media: media, Diagnostics: formatDiags}, nil
+			diag := builder.finishSuccess(player, rawFormats, len(media.Formats))
+			e.setLatestDiagnostics(diag)
+			return &DownloadableResult{Media: media, Diagnostics: formatDiags, ExtractionReport: diag}, nil
 		}
+		builder.recordStage(StageChallengeSolve, solveDur, 0, true, nil)
 
 		// Validate solver output against batch requests and record resolution source.
 		type validatedItem struct {
@@ -400,12 +493,21 @@ func (e *Extractor) ExtractDownloadableResult(
 	e.setDiagnostics(formatDiags)
 
 	if len(media.Formats) == 0 {
-		return nil, classifyNoSupportedFormats(clientName, player)
+		extErr := classifyNoSupportedFormats(clientName, player)
+		builder.populateInventory(player, rawFormats, 0)
+		diag := builder.finishFailure(StageFormatFiltering, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
 
+	diag := builder.finishSuccess(player, rawFormats, len(media.Formats))
+	e.setLatestDiagnostics(diag)
+
 	return &DownloadableResult{
-		Media:       media,
-		Diagnostics: formatDiags,
+		Media:            media,
+		Diagnostics:      formatDiags,
+		ExtractionReport: diag,
 	}, nil
 }
 

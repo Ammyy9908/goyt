@@ -14,8 +14,9 @@ import (
 )
 
 type HLSExtraction struct {
-	Media    *goyt.Media
-	Manifest goyt.Resource
+	Media            *goyt.Media
+	Manifest         goyt.Resource
+	ExtractionReport *ExtractionDiagnostics
 }
 
 // ExtractHLS discovers an HLS manifest using the default client (visionos).
@@ -45,78 +46,133 @@ func (e *Extractor) ExtractHLSWithClient(
 	}
 
 	profile, _ := GetClientProfile(clientName)
+	builder := newDiagBuilder(clientName, id)
 
 	var player *playerResponse
+	var playerReqDur time.Duration
 
 	if clientName == ClientWeb {
+		t0 := time.Now()
 		player, err = e.fetchWatchPagePlayer(ctx, id)
+		dur := time.Since(t0)
 		if err != nil {
-			return nil, classifyExtractionFailure(clientName, err)
+			builder.recordStage(StageWatchPageFetch, dur, 0, false, err)
+			extErr := classifyExtractionFailure(clientName, err)
+			diag := builder.finishFailure(StageWatchPageFetch, err, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
+		builder.recordStage(StageWatchPageFetch, dur, http.StatusOK, true, nil)
 	} else {
+		t0 := time.Now()
 		visitor, vErr := e.fetchVisitorData(ctx, id)
+		vDur := time.Since(t0)
 		if vErr != nil {
-			return nil, classifyExtractionFailure(clientName, vErr)
+			builder.recordStage(StageWatchPageFetch, vDur, 0, false, vErr)
+			extErr := classifyExtractionFailure(clientName, vErr)
+			diag := builder.finishFailure(StageWatchPageFetch, vErr, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
+		builder.diagnostics.SessionInputs.VisitorDataPresent = (visitor != "")
+		builder.recordStage(StageWatchPageFetch, vDur, http.StatusOK, true, nil)
 
+		t1 := time.Now()
 		player, err = e.requestPlayer(
 			ctx,
 			id,
 			profile,
 			visitor,
 		)
+		playerReqDur = time.Since(t1)
 		if err != nil {
-			return nil, classifyExtractionFailure(clientName, err)
+			builder.recordStage(StagePlayerRequest, playerReqDur, 0, false, err)
+			extErr := classifyExtractionFailure(clientName, err)
+			diag := builder.finishFailure(StagePlayerRequest, err, extErr)
+			extErr.Diagnostics = diag
+			e.setLatestDiagnostics(diag)
+			return nil, extErr
 		}
 	}
 
 	if player.PlayabilityStatus.Status != "OK" {
-		return nil, classifyPlayabilityError(
+		extErr := classifyPlayabilityError(
 			clientName,
 			player.PlayabilityStatus.Status,
 			player.PlayabilityStatus.Reason,
 		)
+		builder.recordStage(StagePlayerRequest, playerReqDur, http.StatusOK, false, extErr)
+		diag := builder.finishFailure(StagePlayerRequest, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
+	}
+
+	if clientName != ClientWeb {
+		builder.recordStage(StagePlayerRequest, playerReqDur, http.StatusOK, true, nil)
 	}
 
 	if player.VideoDetails.IsLiveContent {
-		return nil, &ExtractionError{
+		extErr := &ExtractionError{
 			Code:           ErrCodeNoSupportedFormats,
 			Client:         clientName,
 			PlaybackStatus: player.PlayabilityStatus.Status,
 			Message:        "youtube: live-related videos are not supported by this prototype",
 		}
+		diag := builder.finishFailure(StageFormatDiscovery, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
 
 	rawURL := player.StreamingData.HLSManifestURL
 	if rawURL == "" {
-		return nil, &ExtractionError{
+		extErr := &ExtractionError{
 			Code:    ErrCodeManifestUnavailable,
 			Client:  clientName,
 			Message: fmt.Sprintf("youtube: %s player response did not expose an HLS manifest", clientName),
 		}
+		diag := builder.finishFailure(StageHLSManifestFetch, nil, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
 
 	manifest, err := youtubeManifestResource(rawURL, profile)
 	if err != nil {
+		var extErr *ExtractionError
 		if strings.Contains(err.Error(), "n parameter") {
-			return nil, &ExtractionError{
+			extErr = &ExtractionError{
 				Code:    ErrCodeNChallengeReq,
 				Client:  clientName,
 				Message: fmt.Sprintf("youtube: %s HLS manifest requires an unsupported n-challenge", clientName),
 				Err:     err,
 			}
+		} else {
+			extErr = &ExtractionError{
+				Code:    ErrCodeInvalidPlayerResponse,
+				Client:  clientName,
+				Message: fmt.Sprintf("youtube: %s invalid HLS manifest: %v", clientName, err),
+				Err:     err,
+			}
 		}
-		return nil, &ExtractionError{
-			Code:    ErrCodeInvalidPlayerResponse,
-			Client:  clientName,
-			Message: fmt.Sprintf("youtube: %s invalid HLS manifest: %v", clientName, err),
-			Err:     err,
-		}
+		diag := builder.finishFailure(StageHLSManifestFetch, err, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
 
+	allRaw := append([]playerFormat{}, player.StreamingData.Formats...)
+	allRaw = append(allRaw, player.StreamingData.AdaptiveFormats...)
+	diag := builder.finishSuccess(player, allRaw, 0)
+	e.setLatestDiagnostics(diag)
+
 	return &HLSExtraction{
-		Media:    buildReport(id, player).Media,
-		Manifest: manifest,
+		Media:            buildReport(id, player).Media,
+		Manifest:         manifest,
+		ExtractionReport: diag,
 	}, nil
 }
 

@@ -2978,3 +2978,221 @@ func createTestMP4Bytes(t *testing.T) []byte {
 	}
 	return data
 }
+
+func TestCLI_Download_DiagnosticsFlag(t *testing.T) {
+	mockMediaData := createTestMP4Bytes(t)
+	videoID := "dQw4w9WgXcQ"
+	watchHTML := fmt.Sprintf(`<html><script>ytcfg.set({"VISITOR_DATA": "CgtUZXN0VmlzaXRvcg%%3D%%3D"});</script>
+<script>var ytInitialPlayerResponse = {
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "%s", "title": "Diag Download Test", "lengthSeconds": "1"},
+	"streamingData": {
+		"formats": [
+			{"itag": 18, "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"", "url": "https://rr1---sn-test.googlevideo.com/videoplayback?expire=1800000000", "width": 640, "height": 360, "bitrate": 500000}
+		]
+	}
+};</script></html>`, videoID)
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/watch") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(watchHTML)),
+				Request:    req,
+			}, nil
+		}
+		if strings.Contains(req.URL.Path, "/videoplayback") {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+				ContentLength: int64(len(mockMediaData)),
+				Body:          io.NopCloser(bytes.NewReader(mockMediaData)),
+				Request:       req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+		outPath := filepath.Join(t.TempDir(), "diag_output.mp4")
+
+		err := Run(context.Background(), []string{
+			"download",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-diagnostics",
+			"-out", outPath,
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("download with -diagnostics failed: %v\nStderr: %s", err, stderr.String())
+		}
+
+		errOutput := stderr.String()
+		if !strings.Contains(errOutput, "=== YouTube Extraction Diagnostics ===") {
+			t.Fatalf("expected stderr to contain diagnostics banner, got:\n%s", errOutput)
+		}
+		if !strings.Contains(errOutput, "Final Outcome:    SUCCESS") {
+			t.Fatalf("expected stderr to contain success outcome, got:\n%s", errOutput)
+		}
+		if !strings.Contains(errOutput, "watch_page_fetch") {
+			t.Fatalf("expected stderr to list watch_page_fetch stage, got:\n%s", errOutput)
+		}
+		if !strings.Contains(errOutput, "Session Inputs:") {
+			t.Fatalf("expected stderr to list session inputs, got:\n%s", errOutput)
+		}
+	})
+}
+
+func TestCLI_Inspect_DiagnosticsFlag_Text(t *testing.T) {
+	videoID := "dQw4w9WgXcQ"
+	watchHTML := fmt.Sprintf(`<html><script>ytcfg.set({"VISITOR_DATA": "CgtUZXN0VmlzaXRvcg%%3D%%3D"});</script>
+<script>var ytInitialPlayerResponse = {
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "%s", "title": "Diag Inspect Test", "lengthSeconds": "60"},
+	"streamingData": {
+		"formats": [
+			{"itag": 18, "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"", "url": "https://rr1---sn-test.googlevideo.com/videoplayback?expire=1800000000", "width": 640, "height": 360, "bitrate": 500000}
+		]
+	}
+};</script></html>`, videoID)
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/watch") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(watchHTML)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		var stdout, stderr bytes.Buffer
+
+		err := Run(context.Background(), []string{
+			"inspect",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-diagnostics",
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("inspect with -diagnostics failed: %v\nStderr: %s", err, stderr.String())
+		}
+
+		outText := stdout.String()
+		if !strings.Contains(outText, "=== YouTube Extraction Diagnostics ===") {
+			t.Fatalf("expected stdout to contain diagnostics banner, got:\n%s", outText)
+		}
+		if !strings.Contains(outText, "Final Outcome:    SUCCESS") {
+			t.Fatalf("expected stdout to contain success outcome, got:\n%s", outText)
+		}
+		if !strings.Contains(outText, "watch_page_fetch") {
+			t.Fatalf("expected stdout to list watch_page_fetch stage, got:\n%s", outText)
+		}
+	})
+}
+
+func TestCLI_Inspect_DiagnosticsFlag_JSON(t *testing.T) {
+	videoID := "dQw4w9WgXcQ"
+	watchHTML := fmt.Sprintf(`<html><script>ytcfg.set({"VISITOR_DATA": "CgtUZXN0VmlzaXRvcg%%3D%%3D"});</script>
+<script>var ytInitialPlayerResponse = {
+	"playabilityStatus": {"status": "OK"},
+	"videoDetails": {"videoId": "%s", "title": "Diag JSON Test", "lengthSeconds": "60"},
+	"streamingData": {
+		"formats": [
+			{"itag": 18, "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"", "url": "https://rr1---sn-test.googlevideo.com/videoplayback?expire=1800000000", "width": 640, "height": 360, "bitrate": 500000}
+		]
+	}
+};</script></html>`, videoID)
+
+	transport := mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/watch") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+				Body:       io.NopCloser(strings.NewReader(watchHTML)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNotFound,
+			Body:       io.NopCloser(strings.NewReader("404")),
+			Request:    req,
+		}, nil
+	})
+
+	withMockTransport(t, transport, func() {
+		// Case 1: inspect -json with -diagnostics: stdout must be valid JSON, stderr receives formatted report.
+		var stdout, stderr bytes.Buffer
+
+		err := Run(context.Background(), []string{
+			"inspect",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-diagnostics",
+			"-json",
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("inspect -json -diagnostics failed: %v\nStderr: %s", err, stderr.String())
+		}
+
+		var resp youtube.InspectResponse
+		if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal inspect response: %v\nRaw: %s", err, stdout.String())
+		}
+
+		if len(resp.Results) != 1 {
+			t.Fatalf("expected 1 result, got %d", len(resp.Results))
+		}
+		if resp.Results[0].Diagnostics == nil {
+			t.Fatalf("expected Diagnostics in JSON inspect result")
+		}
+		if resp.Results[0].Diagnostics.FinalStatus != "success" {
+			t.Fatalf("expected Diagnostics.FinalStatus success, got %s", resp.Results[0].Diagnostics.FinalStatus)
+		}
+		if !resp.Results[0].Diagnostics.SessionInputs.VisitorDataPresent {
+			t.Fatalf("expected VisitorDataPresent in JSON diagnostics")
+		}
+
+		stderrStr := stderr.String()
+		if !strings.Contains(stderrStr, "=== YouTube Extraction Diagnostics ===") {
+			t.Errorf("expected supplemental text diagnostics on stderr with -diagnostics flag, got: %s", stderrStr)
+		}
+
+		// Case 2: inspect -json without -diagnostics: stdout is valid JSON, stderr is empty.
+		stdout.Reset()
+		stderr.Reset()
+
+		err = Run(context.Background(), []string{
+			"inspect",
+			"-url", "https://www.youtube.com/watch?v=" + videoID,
+			"-client", "web",
+			"-json",
+		}, &stdout, &stderr)
+
+		if err != nil {
+			t.Fatalf("inspect -json without -diagnostics failed: %v", err)
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal inspect JSON: %v", err)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("expected empty stderr when -diagnostics is not set, got: %s", stderr.String())
+		}
+	})
+}

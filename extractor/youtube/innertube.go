@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/ammyy9908/goyt"
 )
@@ -53,19 +54,46 @@ func (e *Extractor) inspectVisionOS(
 		return nil, err
 	}
 
+	builder := newDiagBuilder(ClientVisionOS, id)
+	t0 := time.Now()
 	visitorData, err := e.fetchVisitorData(ctx, id)
+	vDur := time.Since(t0)
 	if err != nil {
-		return nil, err
+		builder.recordStage(StageWatchPageFetch, vDur, 0, false, err)
+		extErr := classifyExtractionFailure(ClientVisionOS, err)
+		diag := builder.finishFailure(StageWatchPageFetch, err, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
 	}
+	builder.diagnostics.SessionInputs.VisitorDataPresent = (visitorData != "")
+	builder.recordStage(StageWatchPageFetch, vDur, http.StatusOK, true, nil)
 
+	t1 := time.Now()
 	player, err := e.requestPlayer(
 		ctx,
 		id,
 		visionOSProfile(),
 		visitorData,
 	)
+	pDur := time.Since(t1)
 	if err != nil {
-		return nil, err
+		builder.recordStage(StagePlayerRequest, pDur, 0, false, err)
+		extErr := classifyExtractionFailure(ClientVisionOS, err)
+		diag := builder.finishFailure(StagePlayerRequest, err, extErr)
+		extErr.Diagnostics = diag
+		e.setLatestDiagnostics(diag)
+		return nil, extErr
+	}
+	if player.PlayabilityStatus.Status != "OK" {
+		extErr := classifyPlayabilityError(
+			ClientVisionOS,
+			player.PlayabilityStatus.Status,
+			player.PlayabilityStatus.Reason,
+		)
+		builder.recordStage(StagePlayerRequest, pDur, http.StatusOK, false, extErr)
+	} else {
+		builder.recordStage(StagePlayerRequest, pDur, http.StatusOK, true, nil)
 	}
 
 	report := buildReport(id, player)
@@ -121,6 +149,12 @@ func (e *Extractor) inspectVisionOS(
 		report.Limitations,
 		"Visitor identifier propagated from a fresh watch page; no account cookies or built-in PO-token generator.",
 	)
+
+	allRaw := append([]playerFormat{}, player.StreamingData.Formats...)
+	allRaw = append(allRaw, player.StreamingData.AdaptiveFormats...)
+	diag := builder.finishSuccess(player, allRaw, 0)
+	report.ExtractionReport = diag
+	e.setLatestDiagnostics(diag)
 
 	return report, nil
 }
@@ -188,11 +222,6 @@ func (e *Extractor) requestPlayerWithPOToken(
 	if err != nil {
 		return nil, err
 	}
-
-	req.Header.Set(
-		"X-YouTube-Client-Version",
-		profile.Context.ClientVersion,
-	)
 
 	if visitor != "" {
 		req.Header.Set("X-Goog-Visitor-Id", visitor)

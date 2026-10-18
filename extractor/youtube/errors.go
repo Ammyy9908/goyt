@@ -35,13 +35,14 @@ const (
 
 // ExtractionError represents a structured, diagnostic YouTube extraction error.
 type ExtractionError struct {
-	Code           string   // Stable machine-readable code
-	Client         string   // Client profile name (e.g. "visionos", "web")
-	PlaybackStatus string   // e.g. "LOGIN_REQUIRED", "UNPLAYABLE", "ERROR"
-	PlaybackReason string   // Safe playback reason from YouTube
-	Message        string   // Sanitized, safe human-readable message
-	Err            error    // Underlying wrapped error if any
-	Challenges     []string // Detected format obstacles (e.g. signature_challenge, n_challenge, sabr)
+	Code           string                 // Stable machine-readable code
+	Client         string                 // Client profile name (e.g. "visionos", "web")
+	PlaybackStatus string                 // e.g. "LOGIN_REQUIRED", "UNPLAYABLE", "ERROR"
+	PlaybackReason string                 // Safe playback reason from YouTube
+	Message        string                 // Sanitized, safe human-readable message
+	Err            error                  // Underlying wrapped error if any
+	Challenges     []string               // Detected format obstacles (e.g. signature_challenge, n_challenge, sabr)
+	Diagnostics    *ExtractionDiagnostics // Sanitized extraction diagnostics (no secrets)
 }
 
 func (e *ExtractionError) Error() string {
@@ -122,14 +123,18 @@ func classifyPlayabilityError(client string, status, reason string) *ExtractionE
 var (
 	sensitiveURLRegex   = regexp.MustCompile(`https?://[^\s"'<>]+`)
 	authHeaderRegex     = regexp.MustCompile(`(?i)(authorization:\s*)(bearer\s+)?[^\s,;]+`)
+	bearerTokenRegex    = regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/-]+=*`)
 	cookieHeaderRegex   = regexp.MustCompile(`(?i)(cookie:\s*)[^\r\n]+`)
+	cookiePairRegex     = regexp.MustCompile(`(?i)\b(?:VISITOR_INFO1_LIVE|PREF|YSC|GPS|LOGIN_INFO)=[^;\s"'&]+`)
 	visitorPatternRegex = regexp.MustCompile(`(?i)(visitor(?:_data|_info\w*)?[=:][\s"']?)[^\s"',;&]+`)
 	httpStatusRegex     = regexp.MustCompile(`\bHTTP\s+(\d{3})\b`)
 )
 
 func sanitizeErrorMessage(raw string) string {
 	msg := authHeaderRegex.ReplaceAllString(raw, "$1[REDACTED]")
+	msg = bearerTokenRegex.ReplaceAllString(msg, "Bearer [REDACTED]")
 	msg = cookieHeaderRegex.ReplaceAllString(msg, "$1[REDACTED]")
+	msg = cookiePairRegex.ReplaceAllString(msg, "[COOKIE-REDACTED]")
 	msg = visitorPatternRegex.ReplaceAllString(msg, "$1[REDACTED]")
 
 	msg = sensitiveURLRegex.ReplaceAllStringFunc(msg, func(uStr string) string {
@@ -150,7 +155,7 @@ func sanitizeErrorMessage(raw string) string {
 }
 
 // classifyExtractionFailure classifies an unexpected request/parsing error into an ExtractionError.
-func classifyExtractionFailure(client string, err error) error {
+func classifyExtractionFailure(client string, err error) *ExtractionError {
 	if err == nil {
 		return nil
 	}

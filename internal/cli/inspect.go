@@ -29,6 +29,11 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		false,
 		"emit machine-readable JSON output",
 	)
+	diagnosticsFlag := flags.Bool(
+		"diagnostics",
+		false,
+		"print sanitized extraction diagnostics report",
+	)
 	jsRuntimeFlag := flags.String(
 		"js-runtime",
 		"none",
@@ -37,7 +42,7 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, `Usage: goyt inspect -url YOUTUBE_URL [options]
-  goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-json]
+  goyt inspect -url YOUTUBE_URL [-client web|visionos|all] [-js-runtime none|node|deno|bun|qjs|auto|PATH] [-diagnostics] [-json]
   goyt inspect -help`)
 		flags.PrintDefaults()
 	}
@@ -94,17 +99,43 @@ func runInspect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			if err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			}
+			if *diagnosticsFlag {
+				var extErr *youtube.ExtractionError
+				if err != nil && errors.As(err, &extErr) && extErr.Diagnostics != nil {
+					fmt.Fprintln(stderr, extErr.Diagnostics.FormatTextReport())
+				} else if report != nil && report.ExtractionReport != nil {
+					fmt.Fprintln(stderr, report.ExtractionReport.FormatTextReport())
+				} else if diag := extractor.LatestDiagnostics(); diag != nil {
+					fmt.Fprintln(stderr, diag.FormatTextReport())
+				}
+			}
 		} else {
 			fmt.Fprintf(stdout, "\n=== %s ===\n", name)
 
 			if err != nil {
 				fmt.Fprintf(stdout, "Inspection failed: %v\n", err)
 				failures = append(failures, fmt.Errorf("%s: %w", name, err))
+				if *diagnosticsFlag {
+					var extErr *youtube.ExtractionError
+					if errors.As(err, &extErr) && extErr.Diagnostics != nil {
+						fmt.Fprintln(stdout, extErr.Diagnostics.FormatTextReport())
+					} else if diag := extractor.LatestDiagnostics(); diag != nil {
+						fmt.Fprintln(stdout, diag.FormatTextReport())
+					}
+				}
 				continue
 			}
 
 			if err := printInspectReport(report, stdout); err != nil {
 				return err
+			}
+
+			if *diagnosticsFlag {
+				if report != nil && report.ExtractionReport != nil {
+					fmt.Fprintln(stdout, report.ExtractionReport.FormatTextReport())
+				} else if diag := extractor.LatestDiagnostics(); diag != nil {
+					fmt.Fprintln(stdout, diag.FormatTextReport())
+				}
 			}
 		}
 	}

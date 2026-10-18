@@ -117,8 +117,9 @@ func (d FormatDiagnostics) String() string {
 
 // DownloadableResult contains the extracted downloadable media and its result-scoped challenge diagnostics.
 type DownloadableResult struct {
-	Media       *goyt.Media
-	Diagnostics map[string]FormatDiagnostics
+	Media            *goyt.Media
+	Diagnostics      map[string]FormatDiagnostics
+	ExtractionReport *ExtractionDiagnostics
 }
 
 // FormatDiagnostics returns the challenge resolution diagnostics for a format from this extraction result.

@@ -29,6 +29,7 @@ type ClientInspectResult struct {
 	HLSAudioRenditions    []InspectHLSRenditionDTO `json:"hls_audio_renditions"`
 	Limitations           []string                 `json:"limitations"`
 	Error                 *InspectErrorDTO         `json:"error"`
+	Diagnostics           *ExtractionDiagnostics   `json:"diagnostics,omitempty"`
 }
 
 // InspectMediaDTO contains basic video metadata.
@@ -127,6 +128,10 @@ func BuildClientInspectResult(clientName string, report *Report, err error) Clie
 			}
 		}
 
+		var diag *ExtractionDiagnostics
+		if extErr != nil && extErr.Diagnostics != nil {
+			diag = extErr.Diagnostics
+		}
 		return ClientInspectResult{
 			Client:                clientName,
 			Status:                "error",
@@ -142,6 +147,7 @@ func BuildClientInspectResult(clientName string, report *Report, err error) Clie
 				Code:    code,
 				Message: msg,
 			},
+			Diagnostics: diag,
 		}
 	}
 
@@ -287,6 +293,10 @@ func BuildClientInspectResult(clientName string, report *Report, err error) Clie
 		limitations = append(limitations, report.Limitations...)
 	}
 
+	var diag *ExtractionDiagnostics
+	if report != nil && report.ExtractionReport != nil {
+		diag = report.ExtractionReport
+	}
 	return ClientInspectResult{
 		Client:                clientName,
 		Status:                "ok",
@@ -299,5 +309,6 @@ func BuildClientInspectResult(clientName string, report *Report, err error) Clie
 		HLSAudioRenditions:    hlsRenditionsDTO,
 		Limitations:           limitations,
 		Error:                 nil,
+		Diagnostics:           diag,
 	}
 }
